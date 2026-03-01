@@ -85,7 +85,7 @@ pub async fn send_message(
 
     let messages: Vec<ChatMessage> = history
         .iter()
-        .filter(|m| m.status != MessageStatus::Error)
+        .filter(|m| m.status != MessageStatus::Error && m.status != MessageStatus::Streaming)
         .map(|m| ChatMessage {
             role: m.role.clone(),
             content: m.content.clone(),
@@ -143,15 +143,38 @@ pub async fn send_message(
     // Stream
     let result = provider.stream_chat(request, channel.clone(), cancel_rx).await;
 
-    match &result {
-        Ok(()) => {
+    match result {
+        Ok(stream_result) => {
+            // Persist accumulated content to DB
+            let _ = state.db.with_conn(|conn| {
+                db::messages::update_content(
+                    conn,
+                    &assistant_msg_id,
+                    &stream_result.content,
+                    stream_result.reasoning.as_deref(),
+                    Some(stream_result.prompt_tokens),
+                    Some(stream_result.completion_tokens),
+                )
+            });
             let _ = channel.send(ChatEvent::Finished {
                 message_id: assistant_msg_id.clone(),
             });
         }
         Err(AppError::Cancelled) => {
+            // On cancel, still persist whatever content was accumulated
             let _ = channel.send(ChatEvent::Finished {
                 message_id: assistant_msg_id.clone(),
+            });
+            // Update status to done with partial content (empty is fine)
+            let _ = state.db.with_conn(|conn| {
+                db::messages::update_content(
+                    conn,
+                    &assistant_msg_id,
+                    "",
+                    None,
+                    None,
+                    None,
+                )
             });
         }
         Err(e) => {
@@ -170,7 +193,11 @@ pub async fn send_message(
         .db
         .with_conn(|conn| db::conversations::touch(conn, &conversation_id));
 
-    Ok(assistant_msg)
+    // Return the updated message from DB (not the stale placeholder)
+    let final_msg = state
+        .db
+        .with_conn(|conn| db::messages::get(conn, &assistant_msg_id))?;
+    Ok(final_msg)
 }
 
 #[tauri::command]

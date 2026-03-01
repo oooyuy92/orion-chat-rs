@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 
-use super::Provider;
+use super::{Provider, StreamResult};
 
 pub struct OllamaProvider {
     client: Client,
@@ -61,6 +61,9 @@ impl OllamaProvider {
         if let Some(top_p) = request.common.top_p {
             opts.insert("top_p".into(), json!(top_p));
         }
+        if let Some(max_tokens) = request.common.max_tokens {
+            opts.insert("num_predict".into(), json!(max_tokens));
+        }
 
         // Ollama-specific params
         if let ProviderParams::Ollama {
@@ -107,16 +110,21 @@ impl OllamaProvider {
         body
     }
 
-    fn handle_ndjson_line(&self, line: &str, channel: &Channel<ChatEvent>) -> AppResult<bool> {
+    fn handle_ndjson_line(
+        &self,
+        line: &str,
+        channel: &Channel<ChatEvent>,
+        acc: &mut StreamResult,
+    ) -> AppResult<bool> {
         let json: Value = serde_json::from_str(line)?;
 
-        // Check if this is the final chunk
         let done = json["done"].as_bool().unwrap_or(false);
 
         if done {
-            // Final chunk has usage info
             let prompt = json["prompt_eval_count"].as_u64().unwrap_or(0) as u32;
             let completion = json["eval_count"].as_u64().unwrap_or(0) as u32;
+            acc.prompt_tokens = prompt;
+            acc.completion_tokens = completion;
             if prompt > 0 || completion > 0 {
                 let _ = channel.send(ChatEvent::Usage {
                     prompt_tokens: prompt,
@@ -126,18 +134,20 @@ impl OllamaProvider {
             return Ok(true);
         }
 
-        // Streaming content
         if let Some(message) = json.get("message") {
             if let Some(content) = message["content"].as_str() {
                 if !content.is_empty() {
+                    acc.content.push_str(content);
                     let _ = channel.send(ChatEvent::Delta {
                         content: content.to_string(),
                     });
                 }
             }
-            // Reasoning/thinking content
             if let Some(thinking) = message["thinking"].as_str() {
                 if !thinking.is_empty() {
+                    acc.reasoning
+                        .get_or_insert_with(String::new)
+                        .push_str(thinking);
                     let _ = channel.send(ChatEvent::Reasoning {
                         content: thinking.to_string(),
                     });
@@ -156,7 +166,7 @@ impl Provider for OllamaProvider {
         request: ChatRequest,
         channel: Channel<ChatEvent>,
         mut cancel: watch::Receiver<bool>,
-    ) -> AppResult<()> {
+    ) -> AppResult<StreamResult> {
         let url = format!("{}/api/chat", self.base_url);
         let body = self.build_body(&request);
 
@@ -177,8 +187,8 @@ impl Provider for OllamaProvider {
         }
 
         let mut stream = response.bytes_stream();
-        // NDJSON: one JSON object per line
         let mut buf = String::new();
+        let mut acc = StreamResult::default();
 
         loop {
             tokio::select! {
@@ -187,7 +197,6 @@ impl Provider for OllamaProvider {
                         Some(Ok(chunk)) => {
                             buf.push_str(&String::from_utf8_lossy(&chunk));
 
-                            // Process complete lines
                             while let Some(pos) = buf.find('\n') {
                                 let line = buf[..pos].trim().to_string();
                                 buf = buf[pos + 1..].to_string();
@@ -196,9 +205,9 @@ impl Provider for OllamaProvider {
                                     continue;
                                 }
 
-                                let done = self.handle_ndjson_line(&line, &channel)?;
+                                let done = self.handle_ndjson_line(&line, &channel, &mut acc)?;
                                 if done {
-                                    return Ok(());
+                                    return Ok(acc);
                                 }
                             }
                         }
@@ -217,7 +226,7 @@ impl Provider for OllamaProvider {
             }
         }
 
-        Ok(())
+        Ok(acc)
     }
 
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>> {

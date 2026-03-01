@@ -87,6 +87,12 @@ pub fn list_by_conversation(conn: &Connection, conversation_id: &str) -> AppResu
     Ok(result)
 }
 
+pub fn get(conn: &Connection, id: &str) -> AppResult<Message> {
+    let sql = format!("SELECT {SELECT_COLS} FROM messages WHERE id = ?1");
+    let msg = conn.query_row(&sql, [id], |row| row_to_message(row))?;
+    Ok(msg)
+}
+
 pub fn update_content(
     conn: &Connection,
     id: &str,

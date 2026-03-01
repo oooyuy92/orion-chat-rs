@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 
-use super::Provider;
+use super::{Provider, StreamResult};
 
 pub struct GeminiProvider {
     client: Client,
@@ -41,8 +41,7 @@ impl GeminiProvider {
                 json!({
                     "role": match m.role {
                         Role::User => "user",
-                        Role::Assistant => "model",
-                        _ => unreachable!(),
+                        _ => "model",
                     },
                     "parts": [{"text": m.content}],
                 })
@@ -106,22 +105,29 @@ impl GeminiProvider {
         body
     }
 
-    fn handle_sse_data(&self, data: &str, channel: &Channel<ChatEvent>) -> AppResult<()> {
+    fn handle_sse_data(
+        &self,
+        data: &str,
+        channel: &Channel<ChatEvent>,
+        acc: &mut StreamResult,
+    ) -> AppResult<()> {
         let json: Value = serde_json::from_str(data)?;
 
-        // Extract text and reasoning from candidates
         if let Some(candidates) = json["candidates"].as_array() {
             for candidate in candidates {
                 if let Some(parts) = candidate["content"]["parts"].as_array() {
                     for part in parts {
                         if let Some(text) = part["text"].as_str() {
                             if !text.is_empty() {
-                                // thought:true means reasoning
                                 if part.get("thought") == Some(&json!(true)) {
+                                    acc.reasoning
+                                        .get_or_insert_with(String::new)
+                                        .push_str(text);
                                     let _ = channel.send(ChatEvent::Reasoning {
                                         content: text.to_string(),
                                     });
                                 } else {
+                                    acc.content.push_str(text);
                                     let _ = channel.send(ChatEvent::Delta {
                                         content: text.to_string(),
                                     });
@@ -133,11 +139,12 @@ impl GeminiProvider {
             }
         }
 
-        // Usage metadata
         if let Some(usage) = json.get("usageMetadata") {
             let prompt = usage["promptTokenCount"].as_u64().unwrap_or(0) as u32;
             let completion = usage["candidatesTokenCount"].as_u64().unwrap_or(0) as u32;
             if prompt > 0 || completion > 0 {
+                acc.prompt_tokens = prompt;
+                acc.completion_tokens = completion;
                 let _ = channel.send(ChatEvent::Usage {
                     prompt_tokens: prompt,
                     completion_tokens: completion,
@@ -156,7 +163,7 @@ impl Provider for GeminiProvider {
         request: ChatRequest,
         channel: Channel<ChatEvent>,
         mut cancel: watch::Receiver<bool>,
-    ) -> AppResult<()> {
+    ) -> AppResult<StreamResult> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
             request.model, self.api_key
@@ -182,6 +189,7 @@ impl Provider for GeminiProvider {
 
         let mut stream = response.bytes_stream();
         let mut buf = String::new();
+        let mut acc = StreamResult::default();
 
         loop {
             tokio::select! {
@@ -197,7 +205,7 @@ impl Provider for GeminiProvider {
                                 for line in event_block.lines() {
                                     let line = line.trim();
                                     if let Some(data) = line.strip_prefix("data: ") {
-                                        self.handle_sse_data(data, &channel)?;
+                                        self.handle_sse_data(data, &channel, &mut acc)?;
                                     }
                                 }
                             }
@@ -217,7 +225,7 @@ impl Provider for GeminiProvider {
             }
         }
 
-        Ok(())
+        Ok(acc)
     }
 
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>> {

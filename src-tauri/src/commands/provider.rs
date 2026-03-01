@@ -113,8 +113,13 @@ pub async fn fetch_models(
     state.db.with_conn(|conn| {
         for m in &models {
             conn.execute(
-                "INSERT OR REPLACE INTO models (id, provider_id, name, display_name, max_tokens, is_vision, is_enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)",
+                "INSERT INTO models (id, provider_id, name, display_name, max_tokens, is_vision, is_enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+                 ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    display_name = excluded.display_name,
+                    max_tokens = excluded.max_tokens,
+                    is_vision = excluded.is_vision",
                 rusqlite::params![
                     m.id,
                     m.provider_id,

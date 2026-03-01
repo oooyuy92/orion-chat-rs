@@ -10,6 +10,15 @@ use tokio::sync::watch;
 use crate::error::AppResult;
 use crate::models::{ChatEvent, ChatRequest, ModelInfo};
 
+/// Accumulated result from a streaming chat completion.
+#[derive(Debug, Clone, Default)]
+pub struct StreamResult {
+    pub content: String,
+    pub reasoning: Option<String>,
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+}
+
 #[async_trait]
 pub trait Provider: Send + Sync {
     async fn stream_chat(
@@ -17,7 +26,7 @@ pub trait Provider: Send + Sync {
         request: ChatRequest,
         channel: Channel<ChatEvent>,
         cancel: watch::Receiver<bool>,
-    ) -> AppResult<()>;
+    ) -> AppResult<StreamResult>;
 
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>>;
 

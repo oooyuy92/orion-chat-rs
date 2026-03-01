@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 
-use super::Provider;
+use super::{Provider, StreamResult};
 
 pub struct AnthropicProvider {
     client: Client,
@@ -47,8 +47,7 @@ impl AnthropicProvider {
                 json!({
                     "role": match m.role {
                         Role::User => "user",
-                        Role::Assistant => "assistant",
-                        _ => unreachable!(),
+                        _ => "assistant",
                     },
                     "content": m.content,
                 })
@@ -146,6 +145,7 @@ impl AnthropicProvider {
         event_type: &str,
         data: &str,
         channel: &Channel<ChatEvent>,
+        acc: &mut StreamResult,
     ) -> AppResult<()> {
         let json: Value = serde_json::from_str(data)?;
 
@@ -156,6 +156,7 @@ impl AnthropicProvider {
                         Some("text_delta") => {
                             if let Some(text) = delta["text"].as_str() {
                                 if !text.is_empty() {
+                                    acc.content.push_str(text);
                                     let _ = channel.send(ChatEvent::Delta {
                                         content: text.to_string(),
                                     });
@@ -165,6 +166,9 @@ impl AnthropicProvider {
                         Some("thinking_delta") => {
                             if let Some(thinking) = delta["thinking"].as_str() {
                                 if !thinking.is_empty() {
+                                    acc.reasoning
+                                        .get_or_insert_with(String::new)
+                                        .push_str(thinking);
                                     let _ = channel.send(ChatEvent::Reasoning {
                                         content: thinking.to_string(),
                                     });
@@ -178,6 +182,7 @@ impl AnthropicProvider {
             "message_start" => {
                 if let Some(usage) = json.get("message").and_then(|m| m.get("usage")) {
                     if let Some(input) = usage["input_tokens"].as_u64() {
+                        acc.prompt_tokens = input as u32;
                         let _ = channel.send(ChatEvent::Usage {
                             prompt_tokens: input as u32,
                             completion_tokens: 0,
@@ -188,6 +193,7 @@ impl AnthropicProvider {
             "message_delta" => {
                 if let Some(usage) = json.get("usage") {
                     if let Some(output) = usage["output_tokens"].as_u64() {
+                        acc.completion_tokens = output as u32;
                         let _ = channel.send(ChatEvent::Usage {
                             prompt_tokens: 0,
                             completion_tokens: output as u32,
@@ -209,7 +215,7 @@ impl Provider for AnthropicProvider {
         request: ChatRequest,
         channel: Channel<ChatEvent>,
         mut cancel: watch::Receiver<bool>,
-    ) -> AppResult<()> {
+    ) -> AppResult<StreamResult> {
         let url = format!("{}/v1/messages", self.base_url);
         let body = self.build_body(&request);
 
@@ -217,7 +223,7 @@ impl Provider for AnthropicProvider {
             .client
             .post(&url)
             .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", "2025-04-14")
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -235,6 +241,7 @@ impl Provider for AnthropicProvider {
         let mut stream = response.bytes_stream();
         let mut buf = String::new();
         let mut current_event = String::new();
+        let mut acc = StreamResult::default();
 
         loop {
             tokio::select! {
@@ -253,7 +260,7 @@ impl Provider for AnthropicProvider {
                                         current_event = evt.trim().to_string();
                                     } else if let Some(data) = line.strip_prefix("data: ") {
                                         if !current_event.is_empty() {
-                                            self.handle_sse_event(&current_event, data, &channel)?;
+                                            self.handle_sse_event(&current_event, data, &channel, &mut acc)?;
                                         }
                                     }
                                 }
@@ -274,7 +281,7 @@ impl Provider for AnthropicProvider {
             }
         }
 
-        Ok(())
+        Ok(acc)
     }
 
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>> {
@@ -309,7 +316,7 @@ impl Provider for AnthropicProvider {
             .client
             .post(&url)
             .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", "2025-04-14")
             .header("content-type", "application/json")
             .json(&body)
             .send()

@@ -28,9 +28,12 @@
     "bits-ui": "^2.16.2",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.33",
-    "marked": "^17.0.3"
+    "marked": "^17.0.3",
+    "tauri-plugin-mcp": "^0.1.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

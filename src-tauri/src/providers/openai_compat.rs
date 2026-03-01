@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 
-use super::Provider;
+use super::{Provider, StreamResult};
 
 pub struct OpenAICompatProvider {
     client: Client,
@@ -91,28 +91,40 @@ impl OpenAICompatProvider {
             }
         }
 
+        // OpenAI API doesn't allow both max_tokens and max_completion_tokens
+        if obj.contains_key("max_completion_tokens") {
+            obj.remove("max_tokens");
+        }
+
         body
     }
 
-    fn handle_sse_data(&self, data: &str, channel: &Channel<ChatEvent>) -> AppResult<()> {
+    fn handle_sse_data(
+        &self,
+        data: &str,
+        channel: &Channel<ChatEvent>,
+        acc: &mut StreamResult,
+    ) -> AppResult<()> {
         let json: Value = serde_json::from_str(data)?;
 
         if let Some(choices) = json["choices"].as_array() {
             for choice in choices {
                 let delta = &choice["delta"];
 
-                // Content delta
                 if let Some(content) = delta["content"].as_str() {
                     if !content.is_empty() {
+                        acc.content.push_str(content);
                         let _ = channel.send(ChatEvent::Delta {
                             content: content.to_string(),
                         });
                     }
                 }
 
-                // Reasoning content (e.g. o1/o3 models)
                 if let Some(reasoning) = delta["reasoning_content"].as_str() {
                     if !reasoning.is_empty() {
+                        acc.reasoning
+                            .get_or_insert_with(String::new)
+                            .push_str(reasoning);
                         let _ = channel.send(ChatEvent::Reasoning {
                             content: reasoning.to_string(),
                         });
@@ -121,12 +133,13 @@ impl OpenAICompatProvider {
             }
         }
 
-        // Usage in final chunk
         if let Some(usage) = json.get("usage") {
             if let (Some(prompt), Some(completion)) = (
                 usage["prompt_tokens"].as_u64(),
                 usage["completion_tokens"].as_u64(),
             ) {
+                acc.prompt_tokens = prompt as u32;
+                acc.completion_tokens = completion as u32;
                 let _ = channel.send(ChatEvent::Usage {
                     prompt_tokens: prompt as u32,
                     completion_tokens: completion as u32,
@@ -145,7 +158,7 @@ impl Provider for OpenAICompatProvider {
         request: ChatRequest,
         channel: Channel<ChatEvent>,
         mut cancel: watch::Receiver<bool>,
-    ) -> AppResult<()> {
+    ) -> AppResult<StreamResult> {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let body = self.build_body(&request);
 
@@ -167,9 +180,8 @@ impl Provider for OpenAICompatProvider {
         }
 
         let mut stream = response.bytes_stream();
-
-        // Buffer for incomplete SSE lines across chunks
         let mut buf = String::new();
+        let mut acc = StreamResult::default();
 
         loop {
             tokio::select! {
@@ -178,7 +190,6 @@ impl Provider for OpenAICompatProvider {
                         Some(Ok(chunk)) => {
                             buf.push_str(&String::from_utf8_lossy(&chunk));
 
-                            // Process complete SSE lines
                             while let Some(pos) = buf.find("\n\n") {
                                 let event_block = buf[..pos].to_string();
                                 buf = buf[pos + 2..].to_string();
@@ -186,16 +197,16 @@ impl Provider for OpenAICompatProvider {
                                 for line in event_block.lines() {
                                     let line = line.trim();
                                     if line == "data: [DONE]" {
-                                        return Ok(());
+                                        return Ok(acc);
                                     }
                                     if let Some(data) = line.strip_prefix("data: ") {
-                                        self.handle_sse_data(data, &channel)?;
+                                        self.handle_sse_data(data, &channel, &mut acc)?;
                                     }
                                 }
                             }
                         }
                         Some(Err(e)) => return Err(AppError::Http(e)),
-                        None => break, // Stream ended
+                        None => break,
                     }
                 }
                 _ = cancel.changed() => {
@@ -209,7 +220,7 @@ impl Provider for OpenAICompatProvider {
             }
         }
 
-        Ok(())
+        Ok(acc)
     }
 
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>> {
