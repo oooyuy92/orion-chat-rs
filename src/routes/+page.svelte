@@ -1,12 +1,14 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import ConversationList from '$lib/components/sidebar/ConversationList.svelte';
   import MessageList from '$lib/components/chat/MessageList.svelte';
   import InputArea from '$lib/components/chat/InputArea.svelte';
+  import ModelSelector from '$lib/components/chat/ModelSelector.svelte';
   import ProviderSettings from '$lib/components/settings/ProviderSettings.svelte';
   import { getSidebarOpen, toggleSidebar } from '$lib/stores/ui.svelte';
   import { api } from '$lib/utils/invoke';
   import type { ChatEvent } from '$lib/utils/invoke';
-  import type { Message } from '$lib/types';
+  import type { Message, ModelInfo } from '$lib/types';
 
   type View = 'chat' | 'settings';
   let currentView = $state<View>('chat');
@@ -16,6 +18,26 @@
   let isStreaming = $state(false);
   let streamingMessageId = $state('');
   let currentModelId = $state('');
+  let allModels = $state<ModelInfo[]>([]);
+
+  async function loadModels() {
+    try {
+      const providers = await api.listProviders();
+      const modelArrays = await Promise.all(
+        providers.map((p) => api.fetchModels(p.id).catch(() => [] as ModelInfo[])),
+      );
+      allModels = modelArrays.flat();
+      if (allModels.length > 0 && !currentModelId) {
+        currentModelId = allModels[0].id;
+      }
+    } catch (e) {
+      console.error('Failed to load models:', e);
+    }
+  }
+
+  onMount(() => {
+    loadModels();
+  });
 
   function handleSelect(id: string) {
     activeConversationId = id;
@@ -170,7 +192,7 @@
       </div>
       <div class="p-2 border-t" style="border-color: var(--border);">
         <button
-          onclick={() => { currentView = currentView === 'settings' ? 'chat' : 'settings'; }}
+          onclick={() => { const next = currentView === 'settings' ? 'chat' : 'settings'; if (next === 'chat') loadModels(); currentView = next; }}
           class="w-full text-left px-3 py-2 rounded-lg text-sm cursor-pointer transition-colors flex items-center gap-2"
           style="background: {currentView === 'settings' ? 'var(--accent)' : 'transparent'}; color: {currentView === 'settings' ? '#fff' : 'var(--text-secondary)'}; border: none;"
         >
@@ -199,13 +221,11 @@
 
       {#if currentView === 'chat'}
         <div class="ml-auto">
-          <input
-            type="text"
-            bind:value={currentModelId}
-            placeholder="Model ID (e.g. gpt-4o)"
-            class="text-xs px-2 py-1 rounded"
-            style="background-color: var(--bg-primary); border: 1px solid var(--border); color: var(--text-primary); width: 200px;"
-          />
+          {#if allModels.length > 0}
+            <ModelSelector models={allModels} bind:selected={currentModelId} />
+          {:else}
+            <span class="text-xs" style="color: var(--text-secondary);">No models — add a provider in Settings</span>
+          {/if}
         </div>
       {/if}
     </header>
