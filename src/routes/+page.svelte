@@ -2,10 +2,14 @@
   import ConversationList from '$lib/components/sidebar/ConversationList.svelte';
   import MessageList from '$lib/components/chat/MessageList.svelte';
   import InputArea from '$lib/components/chat/InputArea.svelte';
+  import ProviderSettings from '$lib/components/settings/ProviderSettings.svelte';
   import { getSidebarOpen, toggleSidebar } from '$lib/stores/ui.svelte';
   import { api } from '$lib/utils/invoke';
   import type { ChatEvent } from '$lib/utils/invoke';
   import type { Message } from '$lib/types';
+
+  type View = 'chat' | 'settings';
+  let currentView = $state<View>('chat');
 
   let activeConversationId = $state('');
   let messages = $state<Message[]>([]);
@@ -160,8 +164,19 @@
 
 <div class="flex h-full w-full">
   {#if getSidebarOpen()}
-    <aside class="w-64 flex-shrink-0 border-r" style="border-color: var(--border);">
-      <ConversationList bind:activeId={activeConversationId} onSelect={handleSelect} />
+    <aside class="w-64 flex-shrink-0 border-r flex flex-col" style="border-color: var(--border);">
+      <div class="flex-1 overflow-hidden">
+        <ConversationList bind:activeId={activeConversationId} onSelect={(id) => { currentView = 'chat'; handleSelect(id); }} />
+      </div>
+      <div class="p-2 border-t" style="border-color: var(--border);">
+        <button
+          onclick={() => { currentView = currentView === 'settings' ? 'chat' : 'settings'; }}
+          class="w-full text-left px-3 py-2 rounded-lg text-sm cursor-pointer transition-colors flex items-center gap-2"
+          style="background: {currentView === 'settings' ? 'var(--accent)' : 'transparent'}; color: {currentView === 'settings' ? '#fff' : 'var(--text-secondary)'}; border: none;"
+        >
+          &#9881; Settings
+        </button>
+      </div>
     </aside>
   {/if}
 
@@ -178,20 +193,28 @@
       >
         &#9776;
       </button>
-      <span class="text-sm font-medium" style="color: var(--text-primary);">Orion Chat</span>
+      <span class="text-sm font-medium" style="color: var(--text-primary);">
+        {currentView === 'settings' ? 'Settings' : 'Orion Chat'}
+      </span>
 
-      <div class="ml-auto">
-        <input
-          type="text"
-          bind:value={currentModelId}
-          placeholder="Model ID (e.g. gpt-4o)"
-          class="text-xs px-2 py-1 rounded"
-          style="background-color: var(--bg-primary); border: 1px solid var(--border); color: var(--text-primary); width: 200px;"
-        />
-      </div>
+      {#if currentView === 'chat'}
+        <div class="ml-auto">
+          <input
+            type="text"
+            bind:value={currentModelId}
+            placeholder="Model ID (e.g. gpt-4o)"
+            class="text-xs px-2 py-1 rounded"
+            style="background-color: var(--bg-primary); border: 1px solid var(--border); color: var(--text-primary); width: 200px;"
+          />
+        </div>
+      {/if}
     </header>
 
-    {#if activeConversationId}
+    {#if currentView === 'settings'}
+      <div class="flex-1 overflow-y-auto">
+        <ProviderSettings />
+      </div>
+    {:else if activeConversationId}
       <MessageList {messages} />
       <InputArea disabled={isStreaming} onSend={handleSend} />
     {:else}
