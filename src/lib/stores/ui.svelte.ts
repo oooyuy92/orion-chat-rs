@@ -1,6 +1,6 @@
 type Theme = 'light' | 'dark';
 
-let theme = $state<Theme>('dark');
+let theme = $state<Theme>('light');
 let sidebarOpen = $state(true);
 
 export function getTheme(): Theme {

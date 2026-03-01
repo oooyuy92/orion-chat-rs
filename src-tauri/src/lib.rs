@@ -76,6 +76,8 @@ pub fn run() {
             commands::conversation::get_messages,
             commands::provider::add_provider,
             commands::provider::list_providers,
+            commands::provider::update_provider,
+            commands::provider::delete_provider,
             commands::provider::fetch_models,
             commands::assistant::create_assistant,
             commands::assistant::list_assistants,

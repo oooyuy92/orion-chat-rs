@@ -71,17 +71,41 @@ export const api = {
     providerType: ProviderType,
     apiBase: string,
     apiKey?: string,
+    enabled = true,
   ): Promise<ProviderConfig> {
     return invoke('add_provider', {
       name,
       providerType,
       apiKey: apiKey ?? null,
       apiBase,
+      enabled,
     });
   },
 
   listProviders(): Promise<ProviderConfig[]> {
     return invoke('list_providers');
+  },
+
+  updateProvider(
+    id: string,
+    name: string,
+    providerType: ProviderType,
+    apiBase: string,
+    apiKey: string | null,
+    enabled: boolean,
+  ): Promise<ProviderConfig> {
+    return invoke('update_provider', {
+      id,
+      name,
+      providerType,
+      apiBase,
+      apiKey,
+      enabled,
+    });
+  },
+
+  deleteProvider(id: string): Promise<void> {
+    return invoke('delete_provider', { id });
   },
 
   fetchModels(providerId: string): Promise<ModelInfo[]> {

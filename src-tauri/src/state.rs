@@ -76,4 +76,8 @@ impl AppState {
     pub async fn get_provider(&self, id: &str) -> Option<Arc<dyn Provider>> {
         self.providers.lock().await.get(id).cloned()
     }
+
+    pub async fn unregister_provider(&self, id: &str) {
+        self.providers.lock().await.remove(id);
+    }
 }

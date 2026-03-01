@@ -6,10 +6,10 @@
   let { children } = $props();
 
   onMount(() => {
-    setTheme('dark');
+    setTheme('light');
   });
 </script>
 
-<div class="flex h-screen" style="background-color: var(--bg-primary); color: var(--text-primary);">
+<div class="flex h-screen" style="background-color: var(--background); color: var(--foreground);">
   {@render children()}
 </div>
