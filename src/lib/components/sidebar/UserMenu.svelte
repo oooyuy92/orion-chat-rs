@@ -7,12 +7,9 @@
 		DropdownMenuTrigger
 	} from '$lib/components/ui/dropdown-menu';
 	import { Avatar, AvatarFallback } from '$lib/components/ui/avatar';
-	import { Dialog, DialogContent, DialogHeader, DialogTitle } from '$lib/components/ui/dialog';
-	import ProviderSettings from '$lib/components/settings/ProviderSettings.svelte';
 	import ChevronUpIcon from '@lucide/svelte/icons/chevron-up';
 	import SettingsIcon from '@lucide/svelte/icons/settings';
-
-	let settingsOpen = $state(false);
+	import { goto } from '$app/navigation';
 </script>
 
 <SidebarFooter>
@@ -34,7 +31,7 @@
 					{/snippet}
 				</DropdownMenuTrigger>
 				<DropdownMenuContent side="top" align="end" class="w-[--radix-dropdown-menu-trigger-width] min-w-56">
-					<DropdownMenuItem onclick={() => settingsOpen = true}>
+					<DropdownMenuItem onclick={() => goto('/settings')}>
 						<SettingsIcon class="mr-2 h-4 w-4" />
 						<span>Settings</span>
 					</DropdownMenuItem>
@@ -43,12 +40,3 @@
 		</SidebarMenuItem>
 	</SidebarMenu>
 </SidebarFooter>
-
-<Dialog bind:open={settingsOpen}>
-	<DialogContent class="max-w-2xl max-h-[80vh] overflow-y-auto">
-		<DialogHeader>
-			<DialogTitle>Settings</DialogTitle>
-		</DialogHeader>
-		<ProviderSettings />
-	</DialogContent>
-</Dialog>
