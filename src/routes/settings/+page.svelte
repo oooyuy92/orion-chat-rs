@@ -14,9 +14,7 @@
 		</div>
 	</header>
 
-	<main class="flex-1 overflow-y-auto p-6">
-		<div class="mx-auto max-w-6xl">
-			<ProviderSettings />
-		</div>
+	<main class="flex-1 overflow-y-auto px-6 py-6">
+		<ProviderSettings />
 	</main>
 </div>

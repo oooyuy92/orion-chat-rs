@@ -366,17 +366,6 @@
 </script>
 
 <div class="settings-root">
-  <aside class="settings-nav">
-    {#each sectionGroups as group}
-      <section class="nav-group">
-        <h3>{group.title}</h3>
-        {#each group.items as item}
-          <button class="nav-item" class:is-active={item === 'API 服务器'}>{item}</button>
-        {/each}
-      </section>
-    {/each}
-  </aside>
-
   <section class="provider-list-panel">
     <div class="panel-head">
       <h2>模型服务</h2>
@@ -631,7 +620,7 @@
     height: 100%;
     min-height: 0;
     display: grid;
-    grid-template-columns: 12.5rem 14rem minmax(0, 1fr);
+    grid-template-columns: 18rem minmax(0, 1fr);
     border-top: 1px solid var(--border);
     background: var(--background);
   }
