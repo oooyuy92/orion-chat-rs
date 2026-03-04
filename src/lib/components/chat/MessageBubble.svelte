@@ -2,120 +2,73 @@
   import type { Message } from '$lib/types';
   import { renderMarkdown } from '$lib/utils/markdown';
 
-  let { message }: { message: Message } = $props();
+  type Props = {
+    message: Message;
+  };
+
+  let { message }: Props = $props();
+
+  const isUser = $derived(message.role === 'user');
+  const markdownContent = $derived(
+    message.role === 'assistant' ? renderMarkdown(message.content) : message.content,
+  );
+  const renderedReasoning = $derived(message.reasoning ? renderMarkdown(message.reasoning) : '');
 
   let showReasoning = $state(false);
-  let isUser = $derived(message.role === 'user');
-  let renderedContent = $derived(renderMarkdown(message.content));
-  let renderedReasoning = $derived(message.reasoning ? renderMarkdown(message.reasoning) : '');
 </script>
 
-<div class="message-row" class:is-user={isUser}>
-  <div class="message-group" class:is-user={isUser} class:is-assistant={!isUser}>
-    {#if message.reasoning}
-      <button class="reasoning-toggle" onclick={() => (showReasoning = !showReasoning)}>
-        {showReasoning ? 'Hide reasoning' : 'Thought process'}
-      </button>
+{#if isUser}
+  <!-- 用户消息：右对齐气泡，浅灰背景 -->
+  <div class="group flex w-full max-w-[95%] ml-auto justify-end">
+    <div class="flex w-fit max-w-full flex-col gap-2">
+      <div class="rounded-lg bg-secondary px-4 py-3 text-sm text-foreground">
+        {message.content}
+      </div>
 
-      {#if showReasoning}
-        <div class="reasoning-panel">
-          <div class="reasoning-markdown">{@html renderedReasoning}</div>
-        </div>
+      {#if message.tokenCount}
+        <div class="text-xs text-muted-foreground px-1">{message.tokenCount} tokens</div>
       {/if}
-    {/if}
 
-    <div class="message-surface" class:user-surface={isUser} class:assistant-surface={!isUser}>
-      <div class="message-markdown">{@html renderedContent}</div>
+      {#if message.status === 'error'}
+        <div class="text-xs text-destructive px-1">Message generation failed.</div>
+      {/if}
     </div>
-
-    {#if message.tokenCount}
-      <div class="message-meta">{message.tokenCount} tokens</div>
-    {/if}
-
-    {#if message.status === 'error'}
-      <div class="message-error">Message generation failed.</div>
-    {/if}
   </div>
-</div>
+{:else}
+  <!-- 助手消息：左对齐纯文本，无背景 -->
+  <div class="group flex w-full max-w-[95%]">
+    <div class="flex w-fit max-w-full flex-col gap-2">
+      {#if message.reasoning}
+        <button
+          class="w-fit rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+          onclick={() => (showReasoning = !showReasoning)}
+        >
+          {showReasoning ? 'Hide reasoning' : 'Thought process'}
+        </button>
+
+        {#if showReasoning}
+          <div class="rounded-xl border border-border bg-muted px-3 py-2.5 text-xs text-muted-foreground">
+            <div class="reasoning-markdown">{@html renderedReasoning}</div>
+          </div>
+        {/if}
+      {/if}
+
+      <div class="text-sm text-foreground">
+        <div class="message-markdown">{@html markdownContent}</div>
+      </div>
+
+      {#if message.tokenCount}
+        <div class="text-xs text-muted-foreground px-1">{message.tokenCount} tokens</div>
+      {/if}
+
+      {#if message.status === 'error'}
+        <div class="text-xs text-destructive px-1">Message generation failed.</div>
+      {/if}
+    </div>
+  </div>
+{/if}
 
 <style>
-  .message-row {
-    display: flex;
-    width: 100%;
-    justify-content: flex-start;
-  }
-
-  .message-row.is-user {
-    justify-content: flex-end;
-  }
-
-  .message-group {
-    max-width: 95%;
-    display: flex;
-    flex-direction: column;
-    gap: 0.42rem;
-  }
-
-  .message-group.is-user {
-    align-items: flex-end;
-  }
-
-  .message-surface {
-    min-width: 0;
-    font-size: 0.9rem;
-    line-height: 1.55;
-    color: var(--foreground);
-  }
-
-  .message-surface.user-surface {
-    width: fit-content;
-    max-width: 100%;
-    border-radius: 0.7rem;
-    background: var(--muted);
-    padding: 0.65rem 0.85rem;
-  }
-
-  .message-surface.assistant-surface {
-    width: 100%;
-    padding: 0;
-  }
-
-  .reasoning-toggle {
-    width: fit-content;
-    border: 1px solid var(--border);
-    border-radius: 9999px;
-    background: var(--background);
-    color: var(--muted-foreground);
-    font-size: 0.74rem;
-    padding: 0.24rem 0.62rem;
-    cursor: pointer;
-  }
-
-  .reasoning-toggle:hover {
-    background: var(--muted);
-    color: var(--foreground);
-  }
-
-  .reasoning-panel {
-    border: 1px solid var(--border);
-    border-radius: 0.75rem;
-    background: var(--muted);
-    padding: 0.65rem 0.8rem;
-    font-size: 0.78rem;
-    color: var(--muted-foreground);
-  }
-
-  .message-meta {
-    color: var(--muted-foreground);
-    font-size: 0.72rem;
-    padding: 0 0.1rem;
-  }
-
-  .message-error {
-    color: #b91c1c;
-    font-size: 0.74rem;
-  }
-
   :global(.message-markdown > :first-child) {
     margin-top: 0;
   }
