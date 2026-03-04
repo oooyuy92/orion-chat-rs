@@ -2,6 +2,10 @@
   import { onMount } from 'svelte';
   import type { ProviderConfig, ProviderType } from '$lib/types';
   import { api } from '$lib/utils/invoke';
+  import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '$lib/components/ui/card';
+  import { Button } from '$lib/components/ui/button';
+  import { Input } from '$lib/components/ui/input';
+  import { Separator } from '$lib/components/ui/separator';
 
   type SectionGroup = {
     title: string;
@@ -38,6 +42,8 @@
   let showApiKey = $state(false);
   let saving = $state(false);
   let deleting = $state(false);
+  let updatingModels = $state<Record<string, boolean>>({});
+  let bulkUpdatingModels = $state(false);
 
   let syncingModels = $state<Record<string, boolean>>({});
 
@@ -92,10 +98,6 @@
         return `${base}/chat/completions`;
     }
   });
-
-  function providerTypeLabel(type: ProviderType): string {
-    return providerTypeOptions.find((option) => option.value === type)?.label ?? type;
-  }
 
   function providerTypeDefaultBase(type: ProviderType): string {
     return (
@@ -167,6 +169,63 @@
       error = `模型检测失败：${e}`;
     } finally {
       syncingModels = { ...syncingModels, [providerId]: false };
+    }
+  }
+
+  async function handleToggleModelVisibility(modelId: string, enabled: boolean) {
+    if (!selectedProvider || !draftEnabled) {
+      return;
+    }
+
+    updatingModels = { ...updatingModels, [modelId]: true };
+    error = '';
+    success = '';
+
+    try {
+      await api.updateModelVisibility(modelId, enabled);
+      providers = providers.map((provider) =>
+        provider.id === selectedProvider.id
+          ? {
+              ...provider,
+              models: provider.models.map((model) =>
+                model.id === modelId ? { ...model, enabled } : model,
+              ),
+            }
+          : provider,
+      );
+    } catch (e) {
+      console.error('Failed to update model visibility:', e);
+      error = `更新模型显示状态失败：${e}`;
+    } finally {
+      updatingModels = { ...updatingModels, [modelId]: false };
+    }
+  }
+
+  async function handleBatchModelVisibility(enabled: boolean) {
+    if (!selectedProvider || !draftEnabled || selectedProvider.models.length === 0) {
+      return;
+    }
+
+    bulkUpdatingModels = true;
+    error = '';
+    success = '';
+
+    try {
+      await api.updateProviderModelsVisibility(selectedProvider.id, enabled);
+      providers = providers.map((provider) =>
+        provider.id === selectedProvider.id
+          ? {
+              ...provider,
+              models: provider.models.map((model) => ({ ...model, enabled })),
+            }
+          : provider,
+      );
+      success = enabled ? '已勾选该服务下全部模型。' : '已取消该服务下全部模型。';
+    } catch (e) {
+      console.error('Failed to batch update model visibility:', e);
+      error = `批量更新模型显示状态失败：${e}`;
+    } finally {
+      bulkUpdatingModels = false;
     }
   }
 
@@ -321,10 +380,9 @@
   <section class="provider-list-panel">
     <div class="panel-head">
       <h2>模型服务</h2>
-      <input
-        type="search"
+      <Input
+        type={'search'}
         bind:value={search}
-        class="search-input"
         placeholder="搜索模型平台..."
       />
     </div>
@@ -336,30 +394,35 @@
         <p class="panel-status">未找到匹配服务</p>
       {:else}
         {#each filteredProviders as provider (provider.id)}
-          <button
-            class="provider-item"
-            class:is-active={provider.id === selectedProviderId}
+          <Card
+            class="provider-card {provider.id === selectedProviderId ? 'is-active' : ''}"
             onclick={() => selectProvider(provider.id)}
           >
-            <span class="provider-name">{provider.name}</span>
-            <span class="provider-state" class:enabled={provider.enabled}>
-              {provider.enabled ? 'ON' : 'OFF'}
-            </span>
-          </button>
+            <CardContent class="provider-card-content">
+              <span class="provider-name">{provider.name}</span>
+              <span class="provider-state" class:enabled={provider.enabled}>
+                {provider.enabled ? 'ON' : 'OFF'}
+              </span>
+            </CardContent>
+          </Card>
         {/each}
       {/if}
     </div>
 
     <div class="add-provider">
-      <button class="add-toggle" onclick={() => (showAddForm = !showAddForm)}>
+      <Button
+        variant={'outline'}
+        class="w-full"
+        onclick={() => (showAddForm = !showAddForm)}
+      >
         {showAddForm ? '收起' : '+ 添加'}
-      </button>
+      </Button>
 
       {#if showAddForm}
         <div class="add-form">
           <label>
             服务名称
-            <input bind:value={newName} class="form-input" placeholder="例如：OpenAI 官方" />
+            <Input bind:value={newName} placeholder="例如：OpenAI 官方" />
           </label>
 
           <label>
@@ -377,133 +440,188 @@
 
           <label>
             API 地址
-            <input bind:value={newApiBase} class="form-input" placeholder="https://api.example.com/v1" />
+            <Input bind:value={newApiBase} placeholder="https://api.example.com/v1" />
           </label>
 
           <label>
             API 密钥
-            <input bind:value={newApiKey} class="form-input" type="password" placeholder="可选（Ollama 可留空）" />
+            <Input bind:value={newApiKey} type={'password'} placeholder="可选（Ollama 可留空）" />
           </label>
 
           <label class="switch-row">
-            <input type="checkbox" bind:checked={newEnabled} />
+            <input type="checkbox" checked={newEnabled} onchange={(e) => newEnabled = (e.target as HTMLInputElement).checked} />
             <span>创建后立即启用</span>
           </label>
 
-          <button class="primary-btn" onclick={handleCreateProvider} disabled={creating}>
+          <Button onclick={handleCreateProvider} disabled={creating} class="w-full">
             {creating ? '添加中...' : '确认添加'}
-          </button>
+          </Button>
         </div>
       {/if}
     </div>
   </section>
 
-  <section class="provider-detail-panel">
+  <section class=”provider-detail-panel”>
     {#if error}
-      <div class="alert error">{error}</div>
+      <div class:alert={true} class:error={true}>{error}</div>
     {/if}
     {#if success}
-      <div class="alert success">{success}</div>
+      <div class:alert={true} class:success={true}>{success}</div>
     {/if}
 
     {#if selectedProvider}
-      <div class="detail-head">
+      <div class=”detail-head”>
         <h2>{selectedProvider.name}</h2>
-        <label class="switch-row">
-          <input type="checkbox" bind:checked={draftEnabled} />
+        <label class=”switch-row”>
+          <input type=”checkbox” checked={draftEnabled} onchange={(e) => draftEnabled = (e.target as HTMLInputElement).checked} />
           <span>{draftEnabled ? '已启用' : '已停用'}</span>
         </label>
       </div>
 
-      <div class="detail-grid">
-        <label>
-          提供商类型
-          <select
-            class="form-input"
-            value={draftType}
-            onchange={(event) => handleDraftTypeChange((event.target as HTMLSelectElement).value as ProviderType)}
-          >
-            {#each providerTypeOptions as option (option.value)}
-              <option value={option.value}>{option.label}</option>
-            {/each}
-          </select>
-        </label>
+      <Card>
+        <CardHeader>
+          <CardTitle>基本配置</CardTitle>
+          <CardDescription>配置服务的基本信息和认证</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div class=”detail-grid”>
+            <label>
+              提供商类型
+              <select
+                class=”form-input”
+                value={draftType}
+                onchange={(event) => handleDraftTypeChange((event.target as HTMLSelectElement).value as ProviderType)}
+              >
+                {#each providerTypeOptions as option (option.value)}
+                  <option value={option.value}>{option.label}</option>
+                {/each}
+              </select>
+            </label>
 
-        <label>
-          服务名称
-          <input bind:value={draftName} class="form-input" placeholder="服务名称" />
-        </label>
+            <label>
+              服务名称
+              <Input bind:value={draftName} placeholder=”服务名称” />
+            </label>
 
-        <label class="full-width">
-          API 密钥
-          <div class="key-input-wrap">
-            <input
-              bind:value={draftApiKey}
-              class="form-input"
-              type={showApiKey ? 'text' : 'password'}
-              placeholder="输入 API 密钥"
-            />
-            <button class="plain-btn" onclick={() => (showApiKey = !showApiKey)}>
-              {showApiKey ? '隐藏' : '显示'}
-            </button>
-            <button
-              class="plain-btn"
-              disabled={syncingModels[selectedProvider.id] || !draftEnabled}
-              onclick={() => handleSyncModels(selectedProvider.id)}
-            >
-              {syncingModels[selectedProvider.id] ? '检测中...' : '检测'}
-            </button>
+            <label class=”full-width”>
+              API 密钥
+              <div class=”key-input-wrap”>
+                <Input
+                  bind:value={draftApiKey}
+                  type={showApiKey ? 'text' : 'password'}
+                  placeholder={'输入 API 密钥'}
+                />
+                <Button
+                  variant={'outline'}
+                  size={'sm'}
+                  onclick={() => (showApiKey = !showApiKey)}
+                >
+                  {showApiKey ? '隐藏' : '显示'}
+                </Button>
+                <Button
+                  variant={'outline'}
+                  size={'sm'}
+                  disabled={syncingModels[selectedProvider.id] || !draftEnabled}
+                  onclick={() => handleSyncModels(selectedProvider.id)}
+                >
+                  {syncingModels[selectedProvider.id] ? '检测中...' : '检测'}
+                </Button>
+              </div>
+              <small>多个密钥可用英文逗号分隔。</small>
+            </label>
+
+            <label class=”full-width”>
+              API 地址
+              <Input bind:value={draftApiBase} placeholder=”https://api.example.com/v1” />
+              {#if endpointPreview}
+                <small>预览接口: {endpointPreview}</small>
+              {/if}
+            </label>
           </div>
-          <small>多个密钥可用英文逗号分隔。</small>
-        </label>
+        </CardContent>
+      </Card>
 
-        <label class="full-width">
-          API 地址
-          <input bind:value={draftApiBase} class="form-input" placeholder="https://api.example.com/v1" />
-          {#if endpointPreview}
-            <small>预览接口: {endpointPreview}</small>
+      <Card class=”mt-4”>
+        <CardHeader>
+          <div class=”models-head”>
+            <div>
+              <CardTitle>模型可见性</CardTitle>
+              <CardDescription>管理该服务下的模型显示状态</CardDescription>
+            </div>
+            <div class=”models-actions”>
+              <Button
+                variant={'outline'}
+                size={'sm'}
+                onclick={() => handleBatchModelVisibility(true)}
+                disabled={!draftEnabled || bulkUpdatingModels || selectedProvider.models.length === 0}
+              >
+                全选
+              </Button>
+              <Button
+                variant={'outline'}
+                size={'sm'}
+                onclick={() => handleBatchModelVisibility(false)}
+                disabled={!draftEnabled || bulkUpdatingModels || selectedProvider.models.length === 0}
+              >
+                全不选
+              </Button>
+              <Button
+                variant={'outline'}
+                size={'sm'}
+                onclick={() => handleSyncModels(selectedProvider.id)}
+                disabled={syncingModels[selectedProvider.id] || !draftEnabled}
+              >
+                {syncingModels[selectedProvider.id] ? '同步中...' : '同步模型'}
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {#if selectedProvider.models.length > 0}
+            <ul class=”model-list”>
+              {#each selectedProvider.models as model (model.id)}
+                <li class=”model-item”>
+                  <label class=”model-toggle”>
+                    <input
+                      type=”checkbox”
+                      checked={model.enabled}
+                      disabled={!draftEnabled || updatingModels[model.id] || bulkUpdatingModels}
+                      onchange={(event) =>
+                        handleToggleModelVisibility(
+                          model.id,
+                          (event.target as HTMLInputElement).checked,
+                        )}
+                    />
+                    <span class:model-muted={!model.enabled}>{model.name || model.id}</span>
+                  </label>
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <p class=”panel-status”>暂无模型，点击”同步模型”拉取。</p>
           {/if}
-        </label>
-      </div>
 
-      <div class="models-panel">
-        <div class="models-head">
-          <h3>模型</h3>
-          <button
-            class="plain-btn"
-            onclick={() => handleSyncModels(selectedProvider.id)}
-            disabled={syncingModels[selectedProvider.id] || !draftEnabled}
-          >
-            {syncingModels[selectedProvider.id] ? '同步中...' : '同步模型'}
-          </button>
-        </div>
+          {#if !draftEnabled}
+            <p class:panel-status={true} class:mt-1={true}>当前服务已停用，模型勾选状态会保留但不会在聊天中显示。</p>
+          {/if}
+        </CardContent>
+      </Card>
 
-        {#if selectedProvider.models.length > 0}
-          <ul class="model-list">
-            {#each selectedProvider.models as model (model.id)}
-              <li class="model-item">
-                <span>{model.name || model.id}</span>
-              </li>
-            {/each}
-          </ul>
-        {:else}
-          <p class="panel-status">暂无模型，点击“同步模型”拉取。</p>
-        {/if}
-      </div>
-
-      <div class="detail-actions">
-        <button class="primary-btn" disabled={!isDirty || saving} onclick={handleSaveSelected}>
+      <div class=”detail-actions”>
+        <Button disabled={!isDirty || saving} onclick={handleSaveSelected}>
           {saving ? '保存中...' : '保存'}
-        </button>
-        <button class="danger-btn" disabled={deleting} onclick={handleDeleteSelected}>
+        </Button>
+        <Button variant={'destructive'} disabled={deleting} onclick={handleDeleteSelected}>
           {deleting ? '删除中...' : '删除'}
-        </button>
+        </Button>
       </div>
     {:else}
-      <div class="empty-state">
-        <h3>请选择一个服务</h3>
-        <p>你可以在中间列表中选择，或先点击 “+ 添加” 创建新服务。</p>
-      </div>
+      <Card>
+        <CardContent class=”empty-state”>
+          <h3>请选择一个服务</h3>
+          <p>你可以在中间列表中选择，或先点击 “+ 添加” 创建新服务。</p>
+        </CardContent>
+      </Card>
     {/if}
   </section>
 </div>
@@ -588,7 +706,6 @@
     font-weight: 650;
   }
 
-  .search-input,
   .form-input {
     width: 100%;
     border: 1px solid var(--border);
@@ -601,7 +718,6 @@
     outline: none;
   }
 
-  .search-input:focus,
   .form-input:focus {
     border-color: #c4c4cc;
   }
@@ -616,27 +732,27 @@
     gap: 0.35rem;
   }
 
-  .provider-item {
-    width: 100%;
+  :global(.provider-card) {
+    cursor: pointer;
+    transition: all 0.15s ease;
     border: 1px solid transparent;
-    border-radius: 0.65rem;
-    background: transparent;
-    color: var(--foreground);
+  }
+
+  :global(.provider-card:hover) {
+    background: var(--muted);
+  }
+
+  :global(.provider-card.is-active) {
+    background: var(--muted);
+    border-color: var(--border);
+  }
+
+  :global(.provider-card-content) {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.4rem;
-    padding: 0.48rem 0.52rem;
-    cursor: pointer;
-  }
-
-  .provider-item:hover {
-    background: var(--muted);
-  }
-
-  .provider-item.is-active {
-    background: var(--muted);
-    border-color: var(--border);
+    padding: 0.48rem 0.52rem !important;
   }
 
   .provider-name {
@@ -668,19 +784,8 @@
     padding: 0.6rem;
   }
 
-  .add-toggle {
+  :global(.w-full) {
     width: 100%;
-    border: 1px solid var(--border);
-    background: var(--background);
-    color: var(--foreground);
-    border-radius: 0.6rem;
-    padding: 0.45rem 0.6rem;
-    font-size: 0.82rem;
-    cursor: pointer;
-  }
-
-  .add-toggle:hover {
-    background: var(--muted);
   }
 
   .add-form {
@@ -745,51 +850,27 @@
     align-items: center;
   }
 
-  .plain-btn {
-    border: 1px solid var(--border);
-    background: var(--background);
-    color: var(--foreground);
-    border-radius: 0.55rem;
-    padding: 0.45rem 0.6rem;
-    font-size: 0.75rem;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .plain-btn:hover:enabled {
-    background: var(--muted);
-  }
-
-  .plain-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   small {
     color: var(--muted-foreground);
     font-size: 0.72rem;
   }
 
-  .models-panel {
-    margin-top: 0.85rem;
-    border: 1px solid var(--border);
-    border-radius: 0.7rem;
-    padding: 0.65rem;
-    background: var(--card);
+  :global(.mt-4) {
+    margin-top: 1rem;
   }
 
   .models-head {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     justify-content: space-between;
-    margin-bottom: 0.5rem;
     gap: 0.5rem;
   }
 
-  .models-head h3 {
-    margin: 0;
-    font-size: 0.85rem;
-    font-weight: 650;
+  .models-actions {
+    display: inline-flex;
+    gap: 0.35rem;
+    align-items: center;
+    flex-shrink: 0;
   }
 
   .model-list {
@@ -813,45 +894,40 @@
     white-space: nowrap;
   }
 
+  .model-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    width: 100%;
+    min-width: 0;
+    cursor: pointer;
+  }
+
+  .model-toggle input {
+    margin: 0;
+    cursor: pointer;
+  }
+
+  .model-toggle span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .model-muted {
+    color: var(--muted-foreground);
+    text-decoration: line-through;
+  }
+
+  .mt-1 {
+    margin-top: 0.35rem;
+  }
+
   .detail-actions {
     margin-top: 0.9rem;
     display: flex;
     align-items: center;
     gap: 0.5rem;
-  }
-
-  .primary-btn,
-  .danger-btn {
-    border: none;
-    border-radius: 0.62rem;
-    padding: 0.5rem 0.85rem;
-    font-size: 0.8rem;
-    font-weight: 600;
-    cursor: pointer;
-  }
-
-  .primary-btn {
-    background: var(--primary);
-    color: var(--primary-foreground);
-  }
-
-  .primary-btn:hover:enabled {
-    background: #2a2a2f;
-  }
-
-  .danger-btn {
-    background: #ef4444;
-    color: #fff;
-  }
-
-  .danger-btn:hover:enabled {
-    background: #dc2626;
-  }
-
-  .primary-btn:disabled,
-  .danger-btn:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
   }
 
   .panel-status {
@@ -880,11 +956,9 @@
     color: #166534;
   }
 
-  .empty-state {
-    border: 1px dashed var(--border);
-    border-radius: 0.72rem;
-    background: var(--muted);
-    padding: 1rem;
+  :global(.empty-state) {
+    padding: 2rem 1rem !important;
+    text-align: center;
   }
 
   .empty-state h3 {
