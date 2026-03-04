@@ -1,23 +1,24 @@
 <script lang="ts">
   import ModelSelector from './ModelSelector.svelte';
-  import type { ModelInfo } from '$lib/types';
+  import type { ModelGroup } from '$lib/types';
 
   let {
     disabled = false,
+    disabledReason = '',
     onSend,
     suggestions = [],
-    models = [],
+    modelGroups = [],
     selectedModel = $bindable(''),
   }: {
     disabled?: boolean;
+    disabledReason?: string;
     onSend: (content: string) => void;
     suggestions?: string[];
-    models?: ModelInfo[];
+    modelGroups?: ModelGroup[];
     selectedModel?: string;
   } = $props();
 
   let text = $state('');
-  let textarea: HTMLTextAreaElement | undefined = $state();
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -34,10 +35,6 @@
 
     onSend(trimmed);
     text = '';
-
-    if (textarea) {
-      textarea.style.height = 'auto';
-    }
   }
 
   function submitSuggestion(prompt: string) {
@@ -47,15 +44,6 @@
 
     text = prompt;
     submit();
-  }
-
-  function autoResize() {
-    if (!textarea) {
-      return;
-    }
-
-    textarea.style.height = 'auto';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 192)}px`;
   }
 </script>
 
@@ -74,19 +62,17 @@
     </div>
   {/if}
 
-  <div class="composer-card">
+  <!-- InputGroup structure -->
+  <div class="input-group">
     <textarea
-      bind:this={textarea}
       bind:value={text}
       onkeydown={handleKeydown}
-      oninput={autoResize}
       {disabled}
       placeholder="What would you like to know?"
-      rows="1"
-      class="composer-input"
+      class="input-field"
     ></textarea>
 
-    <div class="composer-controls">
+    <div class="input-actions">
       <div class="tool-row" role="group" aria-label="Prompt tools">
         <button class="tool-button" type="button" disabled={disabled} title="Attach">
           +
@@ -100,14 +86,14 @@
       </div>
 
       <div class="actions-row">
-        {#if models.length > 0}
-          <ModelSelector {models} bind:selected={selectedModel} />
+        {#if modelGroups.length > 0}
+          <ModelSelector {modelGroups} bind:selected={selectedModel} />
         {:else}
           <span class="model-hint">No model</span>
         {/if}
 
         <button
-          class="submit-button"
+          class="send-button"
           type="button"
           onclick={submit}
           disabled={disabled || !text.trim()}
@@ -117,6 +103,10 @@
         </button>
       </div>
     </div>
+
+    {#if disabledReason}
+      <p class="input-hint">{disabledReason}</p>
+    {/if}
   </div>
 </div>
 
@@ -163,14 +153,23 @@
     cursor: not-allowed;
   }
 
-  .composer-card {
-    border: 1px solid var(--border);
+  /* InputGroup structure */
+  .input-group {
+    border: 1px solid var(--input);
     border-radius: 0.9rem;
     background: var(--input);
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
     overflow: hidden;
+    transition: all 0.15s ease;
   }
 
-  .composer-input {
+  .input-group:has(textarea:focus-visible) {
+    border-color: var(--ring);
+    outline: 3px solid rgba(var(--ring-rgb), 0.15);
+    outline-offset: 0;
+  }
+
+  .input-field {
     width: 100%;
     border: none;
     resize: none;
@@ -178,18 +177,19 @@
     color: var(--foreground);
     font-size: 0.9rem;
     line-height: 1.4;
-    min-height: 3.1rem;
+    field-sizing: content;
+    min-height: 4rem;
     max-height: 12rem;
     padding: 0.85rem 0.9rem 0.45rem;
     outline: none;
     box-sizing: border-box;
   }
 
-  .composer-input::placeholder {
+  .input-field::placeholder {
     color: var(--muted-foreground);
   }
 
-  .composer-controls {
+  .input-actions {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -237,11 +237,11 @@
     padding: 0 0.4rem;
   }
 
-  .submit-button {
+  .send-button {
     border: none;
     width: 2rem;
     height: 2rem;
-    border-radius: 0.5rem;
+    border-radius: 26px;
     background: var(--primary);
     color: var(--primary-foreground);
     cursor: pointer;
@@ -250,15 +250,24 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    transition: background-color 0.15s ease;
   }
 
-  .submit-button:hover:enabled {
+  .send-button:hover:enabled {
     background: #27272a;
   }
 
-  .submit-button:disabled {
+  .send-button:disabled {
     cursor: not-allowed;
     opacity: 0.45;
+  }
+
+  .input-hint {
+    margin: 0;
+    padding: 0 0.75rem 0.65rem;
+    color: var(--muted-foreground);
+    font-size: 0.76rem;
+    line-height: 1.35;
   }
 
   @media (max-width: 640px) {
@@ -271,7 +280,7 @@
       padding: 0.38rem 0.7rem;
     }
 
-    .composer-controls {
+    .input-actions {
       flex-wrap: wrap;
       row-gap: 0.45rem;
     }
