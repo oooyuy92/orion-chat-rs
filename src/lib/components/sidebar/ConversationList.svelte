@@ -2,6 +2,14 @@
   import { onMount } from 'svelte';
   import type { Conversation } from '$lib/types';
   import { api } from '$lib/utils/invoke';
+  import { groupConversationsByTime } from '$lib/utils/date';
+  import {
+    SidebarGroup,
+    SidebarGroupLabel,
+    SidebarMenu,
+    SidebarMenuItem,
+    SidebarMenuButton,
+  } from '$lib/components/ui/sidebar';
 
   let {
     activeId = $bindable(''),
@@ -13,6 +21,8 @@
 
   let conversations = $state<Conversation[]>([]);
   let loading = $state(true);
+
+  const grouped = $derived(groupConversationsByTime(conversations));
 
   async function loadConversations() {
     try {
@@ -64,31 +74,175 @@
     {:else if conversations.length === 0}
       <p class="sidebar-status">No conversations yet</p>
     {:else}
-      {#each conversations as conversation (conversation.id)}
-        <button
-          class="conversation-item"
-          class:is-active={conversation.id === activeId}
-          onclick={() => {
-            activeId = conversation.id;
-            onSelect(conversation.id);
-          }}
-        >
-          <span class="conversation-title">{conversation.title}</span>
-          <span
-            role="button"
-            tabindex="0"
-            class="conversation-delete"
-            onclick={(event: MouseEvent) => handleDelete(event, conversation.id)}
-            onkeydown={(event: KeyboardEvent) => {
-              if (event.key === 'Enter') {
-                handleDelete(event, conversation.id);
-              }
-            }}
-          >
-            &#10005;
-          </span>
-        </button>
-      {/each}
+      {#if grouped.today.length > 0}
+        <SidebarGroup>
+          <SidebarGroupLabel>Today</SidebarGroupLabel>
+          <SidebarMenu>
+            {#each grouped.today as conversation (conversation.id)}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={conversation.id === activeId}
+                  onclick={() => {
+                    activeId = conversation.id;
+                    onSelect(conversation.id);
+                  }}
+                >
+                  <span class="conversation-title">{conversation.title}</span>
+                  <span
+                    role="button"
+                    tabindex="0"
+                    class="conversation-delete"
+                    onclick={(event: MouseEvent) => handleDelete(event, conversation.id)}
+                    onkeydown={(event: KeyboardEvent) => {
+                      if (event.key === 'Enter') {
+                        handleDelete(event, conversation.id);
+                      }
+                    }}
+                  >
+                    &#10005;
+                  </span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            {/each}
+          </SidebarMenu>
+        </SidebarGroup>
+      {/if}
+
+      {#if grouped.yesterday.length > 0}
+        <SidebarGroup>
+          <SidebarGroupLabel>Yesterday</SidebarGroupLabel>
+          <SidebarMenu>
+            {#each grouped.yesterday as conversation (conversation.id)}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={conversation.id === activeId}
+                  onclick={() => {
+                    activeId = conversation.id;
+                    onSelect(conversation.id);
+                  }}
+                >
+                  <span class="conversation-title">{conversation.title}</span>
+                  <span
+                    role="button"
+                    tabindex="0"
+                    class="conversation-delete"
+                    onclick={(event: MouseEvent) => handleDelete(event, conversation.id)}
+                    onkeydown={(event: KeyboardEvent) => {
+                      if (event.key === 'Enter') {
+                        handleDelete(event, conversation.id);
+                      }
+                    }}
+                  >
+                    &#10005;
+                  </span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            {/each}
+          </SidebarMenu>
+        </SidebarGroup>
+      {/if}
+
+      {#if grouped.last7Days.length > 0}
+        <SidebarGroup>
+          <SidebarGroupLabel>Last 7 days</SidebarGroupLabel>
+          <SidebarMenu>
+            {#each grouped.last7Days as conversation (conversation.id)}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={conversation.id === activeId}
+                  onclick={() => {
+                    activeId = conversation.id;
+                    onSelect(conversation.id);
+                  }}
+                >
+                  <span class="conversation-title">{conversation.title}</span>
+                  <span
+                    role="button"
+                    tabindex="0"
+                    class="conversation-delete"
+                    onclick={(event: MouseEvent) => handleDelete(event, conversation.id)}
+                    onkeydown={(event: KeyboardEvent) => {
+                      if (event.key === 'Enter') {
+                        handleDelete(event, conversation.id);
+                      }
+                    }}
+                  >
+                    &#10005;
+                  </span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            {/each}
+          </SidebarMenu>
+        </SidebarGroup>
+      {/if}
+
+      {#if grouped.last30Days.length > 0}
+        <SidebarGroup>
+          <SidebarGroupLabel>Last 30 days</SidebarGroupLabel>
+          <SidebarMenu>
+            {#each grouped.last30Days as conversation (conversation.id)}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={conversation.id === activeId}
+                  onclick={() => {
+                    activeId = conversation.id;
+                    onSelect(conversation.id);
+                  }}
+                >
+                  <span class="conversation-title">{conversation.title}</span>
+                  <span
+                    role="button"
+                    tabindex="0"
+                    class="conversation-delete"
+                    onclick={(event: MouseEvent) => handleDelete(event, conversation.id)}
+                    onkeydown={(event: KeyboardEvent) => {
+                      if (event.key === 'Enter') {
+                        handleDelete(event, conversation.id);
+                      }
+                    }}
+                  >
+                    &#10005;
+                  </span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            {/each}
+          </SidebarMenu>
+        </SidebarGroup>
+      {/if}
+
+      {#if grouped.older.length > 0}
+        <SidebarGroup>
+          <SidebarGroupLabel>Older</SidebarGroupLabel>
+          <SidebarMenu>
+            {#each grouped.older as conversation (conversation.id)}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  isActive={conversation.id === activeId}
+                  onclick={() => {
+                    activeId = conversation.id;
+                    onSelect(conversation.id);
+                  }}
+                >
+                  <span class="conversation-title">{conversation.title}</span>
+                  <span
+                    role="button"
+                    tabindex="0"
+                    class="conversation-delete"
+                    onclick={(event: MouseEvent) => handleDelete(event, conversation.id)}
+                    onkeydown={(event: KeyboardEvent) => {
+                      if (event.key === 'Enter') {
+                        handleDelete(event, conversation.id);
+                      }
+                    }}
+                  >
+                    &#10005;
+                  </span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            {/each}
+          </SidebarMenu>
+        </SidebarGroup>
+      {/if}
     {/if}
   </div>
 </div>
@@ -135,31 +289,6 @@
     padding: 0.5rem 0.45rem;
   }
 
-  .conversation-item {
-    width: 100%;
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--foreground);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-    border-radius: 0.65rem;
-    padding: 0.5rem 0.62rem;
-    margin-bottom: 0.18rem;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .conversation-item:hover {
-    background: var(--sidebar-hover);
-  }
-
-  .conversation-item.is-active {
-    background: var(--sidebar-active);
-    border-color: var(--border);
-  }
-
   .conversation-title {
     min-width: 0;
     flex: 1;
@@ -177,7 +306,7 @@
     border-radius: 0.2rem;
   }
 
-  .conversation-item:hover .conversation-delete {
+  :global(.sidebar-menu-button:hover .conversation-delete) {
     opacity: 1;
   }
 
