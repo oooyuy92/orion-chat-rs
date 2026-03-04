@@ -34,6 +34,13 @@ export interface ModelInfo {
   contextLength: number | null;
   supportsVision: boolean;
   supportsStreaming: boolean;
+  enabled: boolean;
+}
+
+export interface ModelGroup {
+  providerId: string;
+  providerName: string;
+  models: ModelInfo[];
 }
 
 export interface ProviderConfig {

@@ -112,6 +112,14 @@ export const api = {
     return invoke('fetch_models', { providerId });
   },
 
+  updateModelVisibility(modelId: string, enabled: boolean): Promise<void> {
+    return invoke('update_model_visibility', { modelId, enabled });
+  },
+
+  updateProviderModelsVisibility(providerId: string, enabled: boolean): Promise<number> {
+    return invoke('update_provider_models_visibility', { providerId, enabled });
+  },
+
   // Assistants
   createAssistant(
     name: string,

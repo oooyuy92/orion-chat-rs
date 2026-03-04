@@ -30,6 +30,7 @@ pub struct ModelInfo {
     pub context_length: Option<u32>,
     pub supports_vision: bool,
     pub supports_streaming: bool,
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

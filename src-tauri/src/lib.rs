@@ -79,6 +79,8 @@ pub fn run() {
             commands::provider::update_provider,
             commands::provider::delete_provider,
             commands::provider::fetch_models,
+            commands::provider::update_model_visibility,
+            commands::provider::update_provider_models_visibility,
             commands::assistant::create_assistant,
             commands::assistant::list_assistants,
             commands::assistant::update_assistant,

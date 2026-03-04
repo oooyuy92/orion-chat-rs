@@ -257,6 +257,7 @@ impl Provider for OllamaProvider {
                     context_length: None,
                     supports_vision: false,
                     supports_streaming: true,
+                    enabled: true,
                 })
             })
             .collect();

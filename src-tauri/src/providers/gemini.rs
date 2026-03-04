@@ -268,6 +268,7 @@ impl Provider for GeminiProvider {
                     context_length: m["inputTokenLimit"].as_u64().map(|v| v as u32),
                     supports_vision: false,
                     supports_streaming: true,
+                    enabled: true,
                 })
             })
             .collect();

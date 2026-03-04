@@ -213,6 +213,43 @@ pub async fn fetch_models(
     Ok(models)
 }
 
+#[tauri::command]
+pub async fn update_model_visibility(
+    state: State<'_, Arc<AppState>>,
+    model_id: String,
+    enabled: bool,
+) -> AppResult<()> {
+    let rows = state.db.with_conn(|conn| update_model_visibility_in_db(conn, &model_id, enabled))?;
+    if rows == 0 {
+        return Err(AppError::NotFound(format!("Model {model_id}")));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn update_provider_models_visibility(
+    state: State<'_, Arc<AppState>>,
+    provider_id: String,
+    enabled: bool,
+) -> AppResult<usize> {
+    let provider_exists = state.db.with_conn(|conn| {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM providers WHERE id = ?1",
+            rusqlite::params![&provider_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    })?;
+
+    if !provider_exists {
+        return Err(AppError::NotFound(format!("Provider {provider_id}")));
+    }
+
+    state
+        .db
+        .with_conn(|conn| update_provider_models_visibility_in_db(conn, &provider_id, enabled))
+}
+
 fn provider_type_to_db(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::OpenaiCompat => "openai_compat",
@@ -252,7 +289,7 @@ fn load_models_for_provider(
     provider_id: &str,
 ) -> AppResult<Vec<ModelInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, provider_id, max_tokens, is_vision FROM models WHERE provider_id = ?1",
+        "SELECT id, name, provider_id, max_tokens, is_vision, is_enabled FROM models WHERE provider_id = ?1",
     )?;
     let rows = stmt.query_map([provider_id], |row| {
         Ok(ModelInfo {
@@ -262,6 +299,7 @@ fn load_models_for_provider(
             context_length: row.get(3)?,
             supports_vision: row.get::<_, i32>(4)? != 0,
             supports_streaming: true,
+            enabled: row.get::<_, i32>(5)? != 0,
         })
     })?;
     let mut result = Vec::new();
@@ -269,6 +307,28 @@ fn load_models_for_provider(
         result.push(row?);
     }
     Ok(result)
+}
+
+fn update_model_visibility_in_db(
+    conn: &rusqlite::Connection,
+    model_id: &str,
+    enabled: bool,
+) -> AppResult<usize> {
+    Ok(conn.execute(
+        "UPDATE models SET is_enabled = ?1 WHERE id = ?2",
+        rusqlite::params![if enabled { 1 } else { 0 }, model_id],
+    )?)
+}
+
+fn update_provider_models_visibility_in_db(
+    conn: &rusqlite::Connection,
+    provider_id: &str,
+    enabled: bool,
+) -> AppResult<usize> {
+    Ok(conn.execute(
+        "UPDATE models SET is_enabled = ?1 WHERE provider_id = ?2",
+        rusqlite::params![if enabled { 1 } else { 0 }, provider_id],
+    )?)
 }
 
 #[cfg(test)]
@@ -291,5 +351,80 @@ mod tests {
     fn validate_allows_enabled_ollama_without_key() {
         let result = validate_provider_config(&ProviderType::Ollama, None, true);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn update_model_visibility_updates_single_model() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE models (
+              id TEXT PRIMARY KEY,
+              provider_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              display_name TEXT,
+              max_tokens INTEGER,
+              is_vision INTEGER NOT NULL DEFAULT 0,
+              is_enabled INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO models (id, provider_id, name, is_enabled) VALUES
+              ('m1', 'p1', 'model-1', 1),
+              ('m2', 'p1', 'model-2', 1),
+              ('m3', 'p2', 'model-3', 1);
+            ",
+        )
+        .unwrap();
+
+        let updated = update_model_visibility_in_db(&conn, "m2", false).unwrap();
+        assert_eq!(updated, 1);
+
+        let enabled: i32 = conn
+            .query_row("SELECT is_enabled FROM models WHERE id = 'm2'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(enabled, 0);
+    }
+
+    #[test]
+    fn update_provider_models_visibility_updates_all_provider_models() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE models (
+              id TEXT PRIMARY KEY,
+              provider_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              display_name TEXT,
+              max_tokens INTEGER,
+              is_vision INTEGER NOT NULL DEFAULT 0,
+              is_enabled INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO models (id, provider_id, name, is_enabled) VALUES
+              ('m1', 'p1', 'model-1', 1),
+              ('m2', 'p1', 'model-2', 1),
+              ('m3', 'p2', 'model-3', 1);
+            ",
+        )
+        .unwrap();
+
+        let updated = update_provider_models_visibility_in_db(&conn, "p1", false).unwrap();
+        assert_eq!(updated, 2);
+
+        let p1_hidden: i32 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM models WHERE provider_id = 'p1' AND is_enabled = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(p1_hidden, 2);
+
+        let p2_enabled: i32 = conn
+            .query_row(
+                "SELECT is_enabled FROM models WHERE id = 'm3'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(p2_enabled, 1);
     }
 }

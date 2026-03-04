@@ -300,6 +300,7 @@ impl Provider for AnthropicProvider {
                 context_length: Some(200000),
                 supports_vision: true,
                 supports_streaming: true,
+                enabled: true,
             })
             .collect())
     }

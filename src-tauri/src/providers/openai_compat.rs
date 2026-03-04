@@ -256,6 +256,7 @@ impl Provider for OpenAICompatProvider {
                     context_length: None,
                     supports_vision: false,
                     supports_streaming: true,
+                    enabled: true,
                 })
             })
             .collect();
