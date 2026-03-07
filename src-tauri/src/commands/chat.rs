@@ -6,22 +6,19 @@ use tauri::State;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
+use crate::providers::Provider;
 use crate::state::AppState;
 
-#[tauri::command]
-pub async fn send_message(
-    state: State<'_, Arc<AppState>>,
-    conversation_id: String,
-    content: String,
-    model_id: String,
-    channel: Channel<ChatEvent>,
-) -> AppResult<Message> {
-    // Look up which provider owns this model
+/// Resolve provider instance and type from a model_id.
+async fn resolve_provider(
+    state: &AppState,
+    model_id: &str,
+) -> AppResult<(Arc<dyn Provider>, String)> {
     let provider_id = state.db.with_conn(|conn| {
         let pid: String = conn
             .query_row(
                 "SELECT provider_id FROM models WHERE id = ?1",
-                [&model_id],
+                [model_id],
                 |row| row.get(0),
             )
             .map_err(|_| AppError::NotFound(format!("Model {model_id}")))?;
@@ -33,7 +30,6 @@ pub async fn send_message(
         .await
         .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id}")))?;
 
-    // Determine provider type for building ProviderParams
     let provider_type: String = state.db.with_conn(|conn| {
         let pt: String = conn
             .query_row(
@@ -45,55 +41,12 @@ pub async fn send_message(
         Ok(pt)
     })?;
 
-    let now = chrono_now();
+    Ok((provider, provider_type))
+}
 
-    // Save user message
-    let user_msg = Message {
-        id: uuid::Uuid::new_v4().to_string(),
-        conversation_id: conversation_id.clone(),
-        role: Role::User,
-        content: content.clone(),
-        reasoning: None,
-        model_id: None,
-        status: MessageStatus::Done,
-        token_count: None,
-        created_at: now.clone(),
-    };
-    state.db.with_conn(|conn| db::messages::create(conn, &user_msg))?;
-
-    // Create assistant placeholder
-    let assistant_msg_id = uuid::Uuid::new_v4().to_string();
-    let assistant_msg = Message {
-        id: assistant_msg_id.clone(),
-        conversation_id: conversation_id.clone(),
-        role: Role::Assistant,
-        content: String::new(),
-        reasoning: None,
-        model_id: Some(model_id.clone()),
-        status: MessageStatus::Streaming,
-        token_count: None,
-        created_at: now,
-    };
-    state
-        .db
-        .with_conn(|conn| db::messages::create(conn, &assistant_msg))?;
-
-    // Load conversation history
-    let history = state
-        .db
-        .with_conn(|conn| db::messages::list_by_conversation(conn, &conversation_id))?;
-
-    let messages: Vec<ChatMessage> = history
-        .iter()
-        .filter(|m| m.status != MessageStatus::Error && m.status != MessageStatus::Streaming)
-        .map(|m| ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        })
-        .collect();
-
-    // Build default provider params based on type
-    let provider_params = match provider_type.as_str() {
+/// Build default ProviderParams from provider type string.
+fn default_provider_params(provider_type: &str) -> ProviderParams {
+    match provider_type {
         "anthropic" => ProviderParams::Anthropic {
             top_k: None,
             thinking: None,
@@ -117,39 +70,88 @@ pub async fn send_message(
             seed: None,
             max_completion_tokens: None,
         },
-    };
+    }
+}
+
+/// Strip paste-ref markers, keeping only the inner text.
+fn strip_paste_markers(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(start) = remaining.find("<<paste:") {
+        result.push_str(&remaining[..start]);
+        if let Some(marker_end) = remaining[start..].find(">>") {
+            let after_marker = start + marker_end + 2;
+            if let Some(close_pos) = remaining[after_marker..].find("<</paste>>") {
+                result.push_str(&remaining[after_marker..after_marker + close_pos]);
+                remaining = &remaining[(after_marker + close_pos + 10)..];
+            } else {
+                result.push_str(&remaining[start..]);
+                remaining = "";
+            }
+        } else {
+            result.push_str(&remaining[start..]);
+            remaining = "";
+        }
+    }
+    result.push_str(remaining);
+    result
+}
+
+/// Core streaming logic: send events, stream, persist result.
+/// The message must already exist in DB. `history` is the conversation context.
+async fn run_stream(
+    state: &AppState,
+    provider: Arc<dyn Provider>,
+    provider_type: &str,
+    model_id: &str,
+    msg_id: &str,
+    conversation_id: &str,
+    history: Vec<Message>,
+    channel: &Channel<ChatEvent>,
+    common_params: Option<CommonParams>,
+    provider_params: Option<ProviderParams>,
+) -> AppResult<Message> {
+    let messages: Vec<ChatMessage> = history
+        .iter()
+        .filter(|m| m.status != MessageStatus::Error && m.status != MessageStatus::Streaming)
+        .map(|m| ChatMessage {
+            role: m.role.clone(),
+            content: strip_paste_markers(&m.content),
+        })
+        .collect();
+
+    let mut common = common_params.unwrap_or(CommonParams {
+        temperature: None,
+        top_p: None,
+        max_tokens: None,
+        stream: true,
+    });
+    common.stream = true;
 
     let request = ChatRequest {
-        model: model_id,
+        model: model_id.to_string(),
         messages,
-        common: CommonParams {
-            temperature: None,
-            top_p: None,
-            max_tokens: None,
-            stream: true,
-        },
-        provider_params,
+        common,
+        provider_params: provider_params.unwrap_or_else(|| default_provider_params(provider_type)),
     };
 
-    // Send Started event
     let _ = channel.send(ChatEvent::Started {
-        message_id: assistant_msg_id.clone(),
+        message_id: msg_id.to_string(),
     });
 
-    // Reset cancel signal
     let _ = state.cancel_sender.send(false);
     let cancel_rx = state.cancel_receiver.clone();
 
-    // Stream
-    let result = provider.stream_chat(request, channel.clone(), cancel_rx).await;
+    let result = provider
+        .stream_chat(request, channel.clone(), cancel_rx)
+        .await;
 
     match result {
         Ok(stream_result) => {
-            // Persist accumulated content to DB
             let _ = state.db.with_conn(|conn| {
                 db::messages::update_content(
                     conn,
-                    &assistant_msg_id,
+                    msg_id,
                     &stream_result.content,
                     stream_result.reasoning.as_deref(),
                     Some(stream_result.prompt_tokens),
@@ -157,24 +159,15 @@ pub async fn send_message(
                 )
             });
             let _ = channel.send(ChatEvent::Finished {
-                message_id: assistant_msg_id.clone(),
+                message_id: msg_id.to_string(),
             });
         }
         Err(AppError::Cancelled) => {
-            // On cancel, still persist whatever content was accumulated
             let _ = channel.send(ChatEvent::Finished {
-                message_id: assistant_msg_id.clone(),
+                message_id: msg_id.to_string(),
             });
-            // Update status to done with partial content (empty is fine)
             let _ = state.db.with_conn(|conn| {
-                db::messages::update_content(
-                    conn,
-                    &assistant_msg_id,
-                    "",
-                    None,
-                    None,
-                    None,
-                )
+                db::messages::update_content(conn, msg_id, "", None, None, None)
             });
         }
         Err(e) => {
@@ -184,20 +177,386 @@ pub async fn send_message(
             });
             let _ = state
                 .db
-                .with_conn(|conn| db::messages::set_error(conn, &assistant_msg_id, &err_msg));
+                .with_conn(|conn| db::messages::set_error(conn, msg_id, &err_msg));
         }
     }
 
-    // Touch conversation
     let _ = state
         .db
-        .with_conn(|conn| db::conversations::touch(conn, &conversation_id));
+        .with_conn(|conn| db::conversations::touch(conn, conversation_id));
 
-    // Return the updated message from DB (not the stale placeholder)
     let final_msg = state
         .db
-        .with_conn(|conn| db::messages::get(conn, &assistant_msg_id))?;
+        .with_conn(|conn| db::messages::get(conn, msg_id))?;
     Ok(final_msg)
+}
+
+/// Create assistant placeholder and stream response.
+async fn do_stream(
+    state: &AppState,
+    provider: Arc<dyn Provider>,
+    provider_type: &str,
+    conversation_id: &str,
+    model_id: &str,
+    channel: &Channel<ChatEvent>,
+    common_params: Option<CommonParams>,
+    provider_params: Option<ProviderParams>,
+) -> AppResult<Message> {
+    let now = chrono_now();
+
+    let assistant_msg_id = uuid::Uuid::new_v4().to_string();
+    let assistant_msg = Message {
+        id: assistant_msg_id.clone(),
+        conversation_id: conversation_id.to_string(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: Some(model_id.to_string()),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at: now,
+        version_group_id: None,
+        version_number: 1,
+        total_versions: 1,
+    };
+    state
+        .db
+        .with_conn(|conn| db::messages::create(conn, &assistant_msg))?;
+
+    let history = state
+        .db
+        .with_conn(|conn| db::messages::list_by_conversation(conn, conversation_id))?;
+
+    run_stream(
+        state,
+        provider,
+        provider_type,
+        model_id,
+        &assistant_msg_id,
+        conversation_id,
+        history,
+        channel,
+        common_params,
+        provider_params,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn send_message(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    content: String,
+    model_id: String,
+    channel: Channel<ChatEvent>,
+    common_params: Option<CommonParams>,
+    provider_params: Option<ProviderParams>,
+) -> AppResult<Message> {
+    let (provider, provider_type) = resolve_provider(&state, &model_id).await?;
+
+    let now = chrono_now();
+
+    let user_msg = Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        conversation_id: conversation_id.clone(),
+        role: Role::User,
+        content,
+        reasoning: None,
+        model_id: None,
+        status: MessageStatus::Done,
+        token_count: None,
+        created_at: now,
+        version_group_id: None,
+        version_number: 1,
+        total_versions: 1,
+    };
+    state
+        .db
+        .with_conn(|conn| db::messages::create(conn, &user_msg))?;
+
+    do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &channel, common_params, provider_params).await
+}
+
+#[tauri::command]
+pub async fn resend_message(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    model_id: String,
+    channel: Channel<ChatEvent>,
+    common_params: Option<CommonParams>,
+    provider_params: Option<ProviderParams>,
+) -> AppResult<Message> {
+    let (provider, provider_type) = resolve_provider(&state, &model_id).await?;
+
+    do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &channel, common_params, provider_params).await
+}
+
+/// Generate a new version of an AI response (+1 button).
+#[tauri::command]
+pub async fn generate_version(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    message_id: String,
+    model_id: String,
+    channel: Channel<ChatEvent>,
+    common_params: Option<CommonParams>,
+    provider_params: Option<ProviderParams>,
+) -> AppResult<Message> {
+    let (provider, provider_type) = resolve_provider(&state, &model_id).await?;
+
+    // 1. Initialize version group if needed
+    state
+        .db
+        .with_conn(|conn| db::messages::init_version_group(conn, &message_id))?;
+
+    // The version_group_id is the original message's ID
+    let version_group_id: String = state.db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT COALESCE(version_group_id, id) FROM messages WHERE id = ?1",
+            [&message_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| AppError::NotFound(format!("Message {message_id}")))
+    })?;
+
+    // 2. Check version limit
+    let next_version = state
+        .db
+        .with_conn(|conn| db::messages::next_version_number(conn, &version_group_id))?;
+    if next_version > 50 {
+        return Err(AppError::Provider("Version limit (50) reached".into()));
+    }
+
+    // 3. Deactivate all versions
+    state
+        .db
+        .with_conn(|conn| db::messages::deactivate_versions(conn, &version_group_id))?;
+
+    // 4. Get created_at of v1 for consistent ordering
+    let created_at: String = state.db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT created_at FROM messages WHERE id = ?1",
+            [&version_group_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| AppError::NotFound("Version group".into()))
+    })?;
+
+    // 5. Create new version message
+    let new_msg_id = uuid::Uuid::new_v4().to_string();
+    let new_msg = Message {
+        id: new_msg_id.clone(),
+        conversation_id: conversation_id.clone(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: Some(model_id.clone()),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at,
+        version_group_id: Some(version_group_id.clone()),
+        version_number: next_version,
+        total_versions: 0,
+    };
+    state
+        .db
+        .with_conn(|conn| db::messages::create(conn, &new_msg))?;
+
+    // 6. Delete messages after this version group
+    state.db.with_conn(|conn| {
+        db::messages::delete_after_version_group(conn, &conversation_id, &version_group_id)
+    })?;
+
+    // 7. Load history before the version group
+    let history = state
+        .db
+        .with_conn(|conn| db::messages::list_before_message(conn, &conversation_id, &version_group_id))?;
+
+    // 8. Stream
+    run_stream(
+        &state,
+        provider,
+        &provider_type,
+        &model_id,
+        &new_msg_id,
+        &conversation_id,
+        history,
+        &channel,
+        common_params,
+        provider_params,
+    )
+    .await
+}
+
+/// Regenerate an existing message in-place (for versioned or non-versioned messages).
+#[tauri::command]
+pub async fn regenerate_message(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    message_id: String,
+    model_id: String,
+    channel: Channel<ChatEvent>,
+    common_params: Option<CommonParams>,
+    provider_params: Option<ProviderParams>,
+) -> AppResult<Message> {
+    let (provider, provider_type) = resolve_provider(&state, &model_id).await?;
+
+    // Get version info
+    let version_group_id: Option<String> = state.db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT version_group_id FROM messages WHERE id = ?1",
+            [&message_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| AppError::NotFound(format!("Message {message_id}")))
+    })?;
+
+    // Delete subsequent messages
+    if let Some(ref gid) = version_group_id {
+        state.db.with_conn(|conn| {
+            db::messages::delete_after_version_group(conn, &conversation_id, gid)
+        })?;
+    } else {
+        state
+            .db
+            .with_conn(|conn| db::messages::delete_after(conn, &conversation_id, &message_id))?;
+    }
+
+    // Clear message for regeneration
+    state
+        .db
+        .with_conn(|conn| db::messages::clear_for_regenerate(conn, &message_id))?;
+
+    // Load history before this message (or version group)
+    let before_id = version_group_id.as_deref().unwrap_or(&message_id);
+    let history = state
+        .db
+        .with_conn(|conn| db::messages::list_before_message(conn, &conversation_id, before_id))?;
+
+    run_stream(
+        &state,
+        provider,
+        &provider_type,
+        &model_id,
+        &message_id,
+        &conversation_id,
+        history,
+        &channel,
+        common_params,
+        provider_params,
+    )
+    .await
+}
+
+/// Compress conversation: summarize all messages, replace with a single summary message.
+#[tauri::command]
+pub async fn compress_conversation(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    model_id: String,
+    channel: Channel<ChatEvent>,
+) -> AppResult<Vec<Message>> {
+    let (provider, provider_type) = resolve_provider(&state, &model_id).await?;
+
+    // Load all messages
+    let history = state
+        .db
+        .with_conn(|conn| db::messages::list_by_conversation(conn, &conversation_id))?;
+
+    if history.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Build summarization request
+    let mut chat_messages = vec![ChatMessage {
+        role: Role::System,
+        content: "You are a conversation summarizer. Summarize the following conversation concisely but comprehensively. Include all key topics, decisions, code snippets, and important details. The summary should allow the conversation to continue naturally. Respond with the summary only, in the same language as the conversation.".to_string(),
+    }];
+
+    for msg in &history {
+        if msg.status != MessageStatus::Error {
+            chat_messages.push(ChatMessage {
+                role: msg.role.clone(),
+                content: strip_paste_markers(&msg.content),
+            });
+        }
+    }
+
+    let request = ChatRequest {
+        model: model_id.to_string(),
+        messages: chat_messages,
+        common: CommonParams {
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            stream: true,
+        },
+        provider_params: default_provider_params(&provider_type),
+    };
+
+    let _ = channel.send(ChatEvent::Started {
+        message_id: "compress".to_string(),
+    });
+
+    let _ = state.cancel_sender.send(false);
+    let cancel_rx = state.cancel_receiver.clone();
+
+    let result = provider
+        .stream_chat(request, channel.clone(), cancel_rx)
+        .await;
+
+    match result {
+        Ok(stream_result) => {
+            // Delete all messages in conversation (hard delete)
+            state.db.with_conn(|conn| {
+                conn.execute(
+                    "DELETE FROM messages WHERE conversation_id = ?1",
+                    [&conversation_id],
+                )
+                .map_err(AppError::Database)?;
+                Ok(())
+            })?;
+
+            // Create summary assistant message
+            let now = chrono_now();
+            let summary_msg = Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                conversation_id: conversation_id.clone(),
+                role: Role::Assistant,
+                content: stream_result.content,
+                reasoning: None,
+                model_id: Some(model_id),
+                status: MessageStatus::Done,
+                token_count: Some(stream_result.prompt_tokens + stream_result.completion_tokens),
+                created_at: now,
+                version_group_id: None,
+                version_number: 1,
+                total_versions: 1,
+            };
+            state
+                .db
+                .with_conn(|conn| db::messages::create(conn, &summary_msg))?;
+
+            let _ = state
+                .db
+                .with_conn(|conn| db::conversations::touch(conn, &conversation_id));
+
+            let _ = channel.send(ChatEvent::Finished {
+                message_id: "compress".to_string(),
+            });
+
+            let messages = state
+                .db
+                .with_conn(|conn| db::messages::list_by_conversation(conn, &conversation_id))?;
+            Ok(messages)
+        }
+        Err(e) => {
+            let _ = channel.send(ChatEvent::Error {
+                message: e.to_string(),
+            });
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -207,12 +566,10 @@ pub async fn stop_generation(state: State<'_, Arc<AppState>>) -> AppResult<()> {
 }
 
 pub(crate) fn chrono_now() -> String {
-    // Simple ISO-8601 timestamp using std
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    // Format as basic datetime — good enough for SQLite ordering
     let secs_per_day = 86400u64;
     let days = now / secs_per_day;
     let rem = now % secs_per_day;
@@ -220,7 +577,6 @@ pub(crate) fn chrono_now() -> String {
     let minutes = (rem % 3600) / 60;
     let seconds = rem % 60;
 
-    // Days since 1970-01-01
     let mut y = 1970i64;
     let mut d = days as i64;
     loop {

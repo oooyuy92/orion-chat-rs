@@ -5,7 +5,7 @@ pub enum AppError {
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
     #[error("Provider error: {0}")]
@@ -14,6 +14,13 @@ pub enum AppError {
     NotFound(String),
     #[error("Cancelled")]
     Cancelled,
+}
+
+impl From<reqwest::Error> for AppError {
+    fn from(e: reqwest::Error) -> Self {
+        // Strip URL from error to avoid leaking API keys embedded in query params
+        AppError::Http(e.without_url().to_string())
+    }
 }
 
 impl Serialize for AppError {

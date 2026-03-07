@@ -3,3 +3,7 @@ build/
 .svelte-kit/
 dist/
 src-tauri/target/
+.claude/
+.env
+.env.*
+.DS_Store

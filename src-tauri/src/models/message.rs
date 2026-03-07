@@ -30,6 +30,9 @@ pub struct Message {
     pub status: MessageStatus,
     pub token_count: Option<u32>,
     pub created_at: String,
+    pub version_group_id: Option<String>,
+    pub version_number: u32,
+    pub total_versions: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

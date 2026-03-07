@@ -2,10 +2,11 @@
   import { onMount } from 'svelte';
   import type { ProviderConfig, ProviderType } from '$lib/types';
   import { api } from '$lib/utils/invoke';
-  import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '$lib/components/ui/card';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
-  import { Separator } from '$lib/components/ui/separator';
+  import { Slider } from '$lib/components/ui/slider';
+  import { load as loadStore } from '@tauri-apps/plugin-store';
+  import { getVersion } from '@tauri-apps/api/app';
 
   type SectionGroup = {
     title: string;
@@ -13,10 +14,12 @@
   };
 
   const sectionGroups: SectionGroup[] = [
-    { title: '模型服务', items: ['默认模型', '常规设置', '显示设置', '数据设置'] },
-    { title: 'MCP 服务器', items: ['网络搜索', '全局记忆', 'API 服务器', '文档处理', '快捷短语', '快捷键'] },
-    { title: '其他', items: ['快捷助手', '划词助手', '关于我们'] },
+    { title: '模型服务', items: ['模型服务', '常规设置', '显示设置', '数据设置'] },
+    { title: 'MCP 服务器', items: ['网络搜索', '全局记忆', '快捷短语', '快捷键'] },
+    { title: '其他', items: ['关于我们'] },
   ];
+
+  let activeNav = $state('模型服务');
 
   const providerTypeOptions: { value: ProviderType; label: string; defaultBase: string }[] = [
     { value: 'openaiCompat', label: 'OpenAI Compatible', defaultBase: 'https://api.openai.com/v1' },
@@ -46,6 +49,426 @@
   let bulkUpdatingModels = $state(false);
 
   let syncingModels = $state<Record<string, boolean>>({});
+
+  let editingName = $state(false);
+  let contextMenu = $state<{ x: number; y: number; providerId: string } | null>(null);
+  let modelSearch = $state('');
+
+  // ── 常规设置 ──
+  let language = $state<'zh' | 'en'>('zh');
+  let proxyMode = $state<'system' | 'none'>('system');
+  let autoLaunch = $state(false);
+
+  async function handleProxyChange(mode: 'system' | 'none') {
+    proxyMode = mode;
+    try { await api.setProxyMode(mode); } catch (e) { console.error(e); }
+  }
+
+  async function handleAutoLaunchChange(val: boolean) {
+    autoLaunch = val;
+    try { await api.setAutostartEnabled(val); } catch (e) { console.error(e); }
+  }
+
+  // ── 显示设置 ──
+  type ThemeColor = { name: string; nameEn: string; primary: string; primaryForeground: string };
+
+  // Auto-rename
+  let autoRename = $state(false);
+  let autoRenameModelId = $state('');
+
+  // Auto-compress
+  let autoCompress = $state(false);
+  let autoCompressModelId = $state('');
+  let autoCompressThreshold = $state(50000);
+
+  const allModelGroups = $derived(
+    providers
+      .filter((p) => p.enabled)
+      .map((p) => ({ providerName: p.name, models: p.models.filter((m) => m.enabled) }))
+      .filter((g) => g.models.length > 0)
+  );
+
+  const themeColors: ThemeColor[] = [
+    { name: '石墨黑', nameEn: 'Graphite',   primary: 'oklch(0.205 0 0)',       primaryForeground: 'oklch(0.985 0 0)' },
+    { name: '雾霾蓝', nameEn: 'Haze Blue',  primary: 'oklch(0.55 0.08 240)',   primaryForeground: 'oklch(0.98 0 0)' },
+    { name: '灰豆绿', nameEn: 'Sage',       primary: 'oklch(0.58 0.07 155)',   primaryForeground: 'oklch(0.98 0 0)' },
+    { name: '烟粉色', nameEn: 'Dusty Rose', primary: 'oklch(0.60 0.08 10)',    primaryForeground: 'oklch(0.98 0 0)' },
+    { name: '燕麦棕', nameEn: 'Oat Brown',  primary: 'oklch(0.55 0.06 60)',    primaryForeground: 'oklch(0.98 0 0)' },
+    { name: '薰衣紫', nameEn: 'Lavender',   primary: 'oklch(0.55 0.09 290)',   primaryForeground: 'oklch(0.98 0 0)' },
+    { name: '暖灰色', nameEn: 'Warm Grey',  primary: 'oklch(0.50 0.02 70)',    primaryForeground: 'oklch(0.98 0 0)' },
+    { name: '深青色', nameEn: 'Dark Teal',  primary: 'oklch(0.50 0.09 195)',   primaryForeground: 'oklch(0.98 0 0)' },
+  ];
+
+  let selectedColorIndex = $state(0);
+  let zoomLevel = $state<number>(100);
+
+  function applyThemeColor(index: number) {
+    selectedColorIndex = index;
+    const color = themeColors[index];
+    document.documentElement.style.setProperty('--primary', color.primary);
+    document.documentElement.style.setProperty('--primary-foreground', color.primaryForeground);
+  }
+
+  function applyZoom(value: number) {
+    document.documentElement.style.setProperty('zoom', `${value}%`);
+  }
+
+  $effect(() => {
+    applyZoom(zoomLevel);
+  });
+
+  // ── 数据设置 ──
+  let backupDir = $state('');
+  let autoBackup = $state<'off' | 'daily' | 'weekly' | 'monthly'>('off');
+  let maxBackups = $state(3);
+  let compactBackup = $state(false);
+  let appDataDir = $state('');
+  let appLogDir = $state('');
+  let cacheSize = $state('...');
+  let clearingCache = $state(false);
+  let resettingData = $state(false);
+  let backingUp = $state(false);
+
+  // ── 关于我们 ──
+  let appVersion = $state('');
+  let autoUpdate = $state(true);
+  let checkingUpdate = $state(false);
+  let updateStatus = $state('');
+
+  async function handleCheckUpdate() {
+    checkingUpdate = true;
+    updateStatus = '';
+    await new Promise(r => setTimeout(r, 1200));
+    checkingUpdate = false;
+    updateStatus = 'latest';
+  }
+
+  async function handlePickBackupDir() {
+    try {
+      const dir = await api.pickDirectory();
+      if (dir) backupDir = dir;
+    } catch (e) { console.error(e); }
+  }
+
+  async function handleClearBackupDir() {
+    backupDir = '';
+  }
+
+  async function handleOpenDataDir() {
+    if (appDataDir) await api.openPath(appDataDir);
+  }
+
+  async function handleOpenLogDir() {
+    if (appLogDir) await api.openPath(appLogDir);
+  }
+
+  async function handleClearCache() {
+    clearingCache = true;
+    try {
+      await api.clearCache();
+      cacheSize = await api.getCacheSize();
+    } catch (e) { console.error(e); } finally {
+      clearingCache = false;
+    }
+  }
+
+  async function handleLocalBackup() {
+    if (!backupDir) {
+      const dir = await api.pickDirectory();
+      if (!dir) return;
+      backupDir = dir;
+    }
+    backingUp = true;
+    try {
+      const now = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const dest = `${backupDir}/orion-backup-${now}.db`;
+      await api.localBackup(dest);
+      success = language === 'zh' ? `备份成功：${dest}` : `Backup saved: ${dest}`;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      backingUp = false;
+    }
+  }
+
+  async function handleResetData() {
+    const msg = language === 'zh'
+      ? '确认重置所有数据？此操作将删除全部对话记录，且不可撤销。'
+      : 'Reset all data? This will delete all conversations and cannot be undone.';
+    if (!window.confirm(msg)) return;
+    resettingData = true;
+    try {
+      await api.resetAppData();
+      success = language === 'zh' ? '数据已重置。' : 'Data has been reset.';
+    } catch (e) {
+      error = String(e);
+    } finally {
+      resettingData = false;
+    }
+  }
+
+  // ── Settings persistence with tauri-plugin-store ──
+  async function loadSettings() {
+    try {
+      const store = await loadStore('settings.json');
+      language = (await store.get<'zh' | 'en'>('language')) ?? 'zh';
+      proxyMode = (await store.get<'system' | 'none'>('proxyMode')) ?? 'system';
+      autoBackup = (await store.get<typeof autoBackup>('autoBackup')) ?? 'off';
+      maxBackups = (await store.get<number>('maxBackups')) ?? 3;
+      compactBackup = (await store.get<boolean>('compactBackup')) ?? false;
+      backupDir = (await store.get<string>('backupDir')) ?? '';
+      selectedColorIndex = (await store.get<number>('colorIndex')) ?? 0;
+      const savedZoom = (await store.get<number>('zoom')) ?? 100;
+      autoUpdate = (await store.get<boolean>('autoUpdate')) ?? true;
+      autoRename = (await store.get<boolean>('autoRename')) ?? false;
+      autoRenameModelId = (await store.get<string>('autoRenameModelId')) ?? '';
+      autoCompress = (await store.get<boolean>('autoCompress')) ?? false;
+      autoCompressModelId = (await store.get<string>('autoCompressModelId')) ?? '';
+      autoCompressThreshold = (await store.get<number>('autoCompressThreshold')) ?? 50000;
+      zoomLevel = savedZoom;
+
+      // Apply loaded display settings immediately
+      applyThemeColor(selectedColorIndex);
+      applyZoom(savedZoom);
+
+      // Load autostart state from backend
+      autoLaunch = await api.getAutostartEnabled();
+      // Apply proxy from backend
+      proxyMode = (await api.getProxyMode()) as 'system' | 'none';
+    } catch (e) {
+      console.error('Failed to load settings:', e);
+    }
+  }
+
+  async function saveSettings() {
+    try {
+      const store = await loadStore('settings.json');
+      await store.set('language', language);
+      await store.set('proxyMode', proxyMode);
+      await store.set('autoBackup', autoBackup);
+      await store.set('maxBackups', maxBackups);
+      await store.set('compactBackup', compactBackup);
+      await store.set('backupDir', backupDir);
+      await store.set('colorIndex', selectedColorIndex);
+      await store.set('zoom', zoomLevel);
+      await store.set('autoUpdate', autoUpdate);
+      await store.set('autoRename', autoRename);
+      await store.set('autoRenameModelId', autoRenameModelId);
+      await store.set('autoCompress', autoCompress);
+      await store.set('autoCompressModelId', autoCompressModelId);
+      await store.set('autoCompressThreshold', autoCompressThreshold);
+      await store.save();
+    } catch (e) {
+      console.error('Failed to save settings:', e);
+    }
+  }
+
+  // Auto-save display/general settings whenever they change
+  $effect(() => {
+    void language; void proxyMode; void autoBackup; void maxBackups;
+    void compactBackup; void backupDir; void selectedColorIndex; void zoomLevel;
+    void autoUpdate; void autoRename; void autoRenameModelId;
+    void autoCompress; void autoCompressModelId; void autoCompressThreshold;
+    saveSettings();
+  });
+
+  onMount(() => {
+    loadProviders();
+    loadSettings().then(async () => {
+      try {
+        const paths = await api.getAppPaths();
+        appDataDir = paths.dataDir;
+        appLogDir = paths.logDir;
+        cacheSize = await api.getCacheSize();
+        appVersion = await getVersion();
+      } catch (e) { console.error(e); }
+    });
+  });
+
+  const t = $derived.by(() => {
+    if (language === 'en') {
+      return {
+        generalSettings: 'General Settings',
+        language: 'Language',
+        proxyMode: 'Proxy Mode',
+        proxySystem: 'System Proxy',
+        proxyNone: 'No Proxy',
+        autoLaunch: 'Launch at Startup',
+        modelService: 'Model Service',
+        searchProvider: 'Search provider...',
+        loading: 'Loading...',
+        noMatch: 'No matching providers',
+        addBtn: 'Add',
+        collapse: 'Collapse',
+        providerName: 'Provider Name',
+        providerNamePlaceholder: 'e.g. OpenAI Official',
+        providerType: 'Provider Type',
+        apiAddress: 'API Address',
+        apiKey: 'API Key',
+        apiKeyOptional: 'Optional (leave empty for Ollama)',
+        enableAfterCreate: 'Enable after creation',
+        confirmAdd: 'Confirm',
+        adding: 'Adding...',
+        enabled: 'Enabled',
+        disabled: 'Disabled',
+        clickToEditName: 'Click to edit name',
+        apiKeyPlaceholder: 'Enter API Key',
+        show: 'Show',
+        hide: 'Hide',
+        check: 'Check',
+        checking: 'Checking...',
+        apiKeyHint: 'Multiple keys can be separated by commas for auto-rotation.',
+        models: 'Models',
+        modelsCount: (n: number) => `${n} models`,
+        searchModel: 'Search models...',
+        selectAll: 'Select All',
+        deselectAll: 'Deselect All',
+        syncModels: 'Sync Models',
+        syncing: 'Syncing...',
+        noModels: 'No models. Click "Sync Models" to fetch.',
+        noMatchModels: 'No matching models',
+        disabledHint: 'Provider is disabled. Model selection is preserved but won\'t show in chat.',
+        selectProvider: 'Select a Provider',
+        selectProviderHint: 'Choose from the list or click "Add" to create one.',
+        setDefault: 'Set as Default',
+        delete: 'Delete',
+        featureWip: 'Feature in development',
+        default: 'Default',
+        displaySettings: 'Display Settings',
+        themeColor: 'Theme Color',
+        zoom: 'Zoom',
+        zoomValue: (v: number) => `${v}%`,
+        autoRename: 'Auto Smart Rename',
+        autoRenameModel: 'Rename Model',
+        autoRenameHint: 'Renames after the 1st round, then every 10 rounds.',
+        autoCompress: 'Auto Context Compression',
+        autoCompressModel: 'Compression Model',
+        autoCompressThreshold: 'Token Threshold',
+        autoCompressHint: 'When context tokens exceed the threshold, automatically summarize and compress.',
+        dataSettings: 'Data Settings',
+        backupSection: 'Data Backup',
+        backupDir: 'Backup Directory',
+        browse: 'Browse',
+        clear: 'Clear',
+        backupRestore: 'Backup & Restore',
+        localBackup: 'Local Backup',
+        backupManager: 'Backup Files',
+        autoBackup: 'Auto Backup',
+        autoBackupOff: 'Off',
+        autoBackupDaily: 'Daily',
+        autoBackupWeekly: 'Weekly',
+        autoBackupMonthly: 'Monthly',
+        maxBackups: 'Max Backups',
+        compactBackup: 'Compact Backup',
+        compactBackupHint: 'Only back up settings and conversation records, excluding files and images.',
+        dataDir: 'Data Directory',
+        appData: 'App Data',
+        openDir: 'Open',
+        appLog: 'App Logs',
+        openLog: 'Open',
+        clearCache: 'Clear Cache',
+        resetData: 'Reset Data',
+        resetDataHint: 'This will delete all local data and cannot be undone.',
+        about: 'About',
+        tagline: 'The smartest, lowest-friction AI chat.',
+        version: 'Version',
+        autoUpdate: 'Auto Update',
+        checkUpdate: 'Check for Updates',
+        checkingUpdate: 'Checking...',
+        upToDate: 'You\'re up to date',
+      };
+    }
+    return {
+      generalSettings: '常规设置',
+      language: '语言',
+      proxyMode: '代理模式',
+      proxySystem: '系统代理',
+      proxyNone: '不使用代理',
+      autoLaunch: '开机自启动',
+      modelService: '模型服务',
+      searchProvider: '搜索模型平台...',
+      loading: '正在加载服务...',
+      noMatch: '未找到匹配服务',
+      addBtn: '+ 添加',
+      collapse: '收起',
+      providerName: '服务名称',
+      providerNamePlaceholder: '例如：OpenAI 官方',
+      providerType: '提供商类型',
+      apiAddress: 'API 地址',
+      apiKey: 'API 密钥',
+      apiKeyOptional: '可选（Ollama 可留空）',
+      enableAfterCreate: '创建后立即启用',
+      confirmAdd: '确认添加',
+      adding: '添加中...',
+      enabled: '已启用',
+      disabled: '已停用',
+      clickToEditName: '点击修改名称',
+      apiKeyPlaceholder: '输入 API 密钥',
+      show: '显示',
+      hide: '隐藏',
+      check: '检测',
+      checking: '检测中...',
+      apiKeyHint: '多个密钥可用英文逗号分隔，将自动轮询。',
+      models: '模型',
+      modelsCount: (n: number) => `${n}个模型`,
+      searchModel: '搜索模型...',
+      selectAll: '全选',
+      deselectAll: '全不选',
+      syncModels: '同步模型',
+      syncing: '同步中...',
+      noModels: '暂无模型，点击"同步模型"拉取。',
+      noMatchModels: '无匹配模型',
+      disabledHint: '当前服务已停用，模型勾选状态会保留但不会在聊天中显示。',
+      selectProvider: '请选择一个服务',
+      selectProviderHint: '你可以在中间列表中选择，或先点击 "+ 添加" 创建新服务。',
+      setDefault: '设成默认',
+      delete: '删除',
+      featureWip: '功能待开发',
+      default: '默认',
+      displaySettings: '显示设置',
+      themeColor: '主题颜色',
+      zoom: '界面缩放',
+      zoomValue: (v: number) => `${v}%`,
+      autoRename: '自动智能重命名',
+      autoRenameModel: '重命名模型',
+      autoRenameHint: '第1轮对话后重命名一次，此后每10轮更新一次。',
+      autoCompress: '自动上下文压缩',
+      autoCompressModel: '压缩模型',
+      autoCompressThreshold: '压缩阈值（Tokens）',
+      autoCompressHint: '当上下文 Token 数超过阈值时，自动总结并压缩对话。',
+      dataSettings: '数据设置',
+      backupSection: '数据备份',
+      backupDir: '备份目录',
+      browse: '浏览',
+      clear: '清除',
+      backupRestore: '数据备份与恢复',
+      localBackup: '本地备份',
+      backupManager: '备份文件管理',
+      autoBackup: '自动备份',
+      autoBackupOff: '关闭',
+      autoBackupDaily: '每天',
+      autoBackupWeekly: '每周',
+      autoBackupMonthly: '每月',
+      maxBackups: '最大备份数',
+      compactBackup: '精简备份',
+      compactBackupHint: '仅备份设置和对话记录，不包含文件和图片等附件内容。',
+      dataDir: '数据目录',
+      appData: '应用数据',
+      openDir: '打开目录',
+      appLog: '应用日志',
+      openLog: '打开日志',
+      clearCache: '清除缓存',
+      resetData: '重置数据',
+      resetDataHint: '将删除所有本地数据，此操作不可撤销。',
+      about: '关于',
+      tagline: '最智能、最低负担的 AI 聊天',
+      version: '版本',
+      autoUpdate: '自动更新',
+      checkUpdate: '检查更新',
+      checkingUpdate: '检查中...',
+      upToDate: '已是最新版本',
+    };
+  });
 
   let showAddForm = $state(false);
   let creating = $state(false);
@@ -78,6 +501,15 @@
       draftApiBase.trim() !== selectedProvider.apiBase ||
       draftApiKey !== (selectedProvider.apiKey ?? '') ||
       draftEnabled !== selectedProvider.enabled
+    );
+  });
+
+  let filteredModels = $derived.by(() => {
+    if (!selectedProvider) return [];
+    const q = modelSearch.trim().toLowerCase();
+    if (!q) return selectedProvider.models;
+    return selectedProvider.models.filter((m) =>
+      (m.name || m.id).toLowerCase().includes(q),
     );
   });
 
@@ -117,6 +549,7 @@
 
   function selectProvider(id: string) {
     selectedProviderId = id;
+    modelSearch = '';
     const provider = providers.find((item) => item.id === id);
     if (provider) {
       applyDraft(provider);
@@ -124,7 +557,7 @@
   }
 
   function normalizeProviders(items: ProviderConfig[]): ProviderConfig[] {
-    return [...items].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    return [...items];
   }
 
   async function loadProviders() {
@@ -260,49 +693,11 @@
         providers.map((provider) => (provider.id === updated.id ? updated : provider)),
       );
       selectProvider(updated.id);
-      success = '服务配置已保存。';
     } catch (e) {
       console.error('Failed to update provider:', e);
       error = `保存失败：${e}`;
     } finally {
       saving = false;
-    }
-  }
-
-  async function handleDeleteSelected() {
-    if (!selectedProvider) {
-      return;
-    }
-
-    const confirmed = window.confirm(`确认删除服务 “${selectedProvider.name}” 吗？`);
-    if (!confirmed) {
-      return;
-    }
-
-    deleting = true;
-    error = '';
-    success = '';
-
-    try {
-      const deletingId = selectedProvider.id;
-      await api.deleteProvider(deletingId);
-      providers = providers.filter((provider) => provider.id !== deletingId);
-
-      if (providers.length > 0) {
-        selectProvider(providers[0].id);
-      } else {
-        selectedProviderId = '';
-        draftName = '';
-        draftApiBase = '';
-        draftApiKey = '';
-      }
-
-      success = '服务已删除。';
-    } catch (e) {
-      console.error('Failed to delete provider:', e);
-      error = `删除失败：${e}`;
-    } finally {
-      deleting = false;
     }
   }
 
@@ -360,73 +755,167 @@
     }
   }
 
-  onMount(() => {
-    loadProviders();
+  let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  $effect(() => {
+    if (!isDirty) return;
+
+    // Access reactive deps
+    void draftName;
+    void draftType;
+    void draftApiBase;
+    void draftApiKey;
+    void draftEnabled;
+
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => {
+      handleSaveSelected();
+    }, 600);
+
+    return () => {
+      if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    };
   });
+
+  function handleContextMenu(e: MouseEvent, providerId: string) {
+    e.preventDefault();
+    contextMenu = { x: e.clientX, y: e.clientY, providerId };
+  }
+
+  function closeContextMenu() {
+    contextMenu = null;
+  }
+
+  async function handleContextDelete() {
+    if (!contextMenu) return;
+    const target = providers.find((p) => p.id === contextMenu!.providerId);
+    if (!target) return;
+
+    const confirmed = window.confirm(`确认删除服务 "${target.name}" 吗？`);
+    closeContextMenu();
+    if (!confirmed) return;
+
+    deleting = true;
+    error = '';
+    success = '';
+
+    try {
+      await api.deleteProvider(target.id);
+      providers = providers.filter((p) => p.id !== target.id);
+
+      if (providers.length > 0) {
+        if (selectedProviderId === target.id) {
+          selectProvider(providers[0].id);
+        }
+      } else {
+        selectedProviderId = '';
+        draftName = '';
+        draftApiBase = '';
+        draftApiKey = '';
+      }
+
+      success = '服务已删除。';
+    } catch (e) {
+      console.error('Failed to delete provider:', e);
+      error = `删除失败：${e}`;
+    } finally {
+      deleting = false;
+    }
+  }
+
+  function handleSetDefault() {
+    if (!contextMenu) return;
+    const targetId = contextMenu.providerId;
+    closeContextMenu();
+
+    const idx = providers.findIndex((p) => p.id === targetId);
+    if (idx <= 0) return; // already first or not found
+
+    const updated = [...providers];
+    const [moved] = updated.splice(idx, 1);
+    updated.unshift(moved);
+    providers = updated;
+    selectProvider(targetId);
+  }
+
+  function startEditName() {
+    editingName = true;
+  }
+
+  function finishEditName() {
+    editingName = false;
+  }
+
+  function handleNameKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') {
+      editingName = false;
+    }
+  }
 </script>
 
 <div class="settings-root">
+  <!-- Left Nav -->
   <aside class="settings-nav">
     {#each sectionGroups as group}
       <section class="nav-group">
         <h3>{group.title}</h3>
         {#each group.items as item}
-          <button class="nav-item" class:is-active={item === 'API 服务器'}>{item}</button>
+          <button class="nav-item" class:is-active={item === activeNav} onclick={() => activeNav = item}>{item}</button>
         {/each}
       </section>
     {/each}
   </aside>
 
-  <section class="provider-list-panel">
-    <div class="panel-head">
-      <h2>模型服务</h2>
-      <Input
-        type={'search'}
-        bind:value={search}
-        placeholder="搜索模型平台..."
-      />
-    </div>
+  {#if activeNav === '模型服务'}
+    <!-- Provider List -->
+    <section class="provider-list-panel">
+      <div class="panel-head">
+        <h2>{t.modelService}</h2>
+        <Input type="search" bind:value={search} placeholder={t.searchProvider} />
+      </div>
 
     <div class="provider-list-scroll">
       {#if loading}
-        <p class="panel-status">正在加载服务...</p>
+        <p class="panel-status">{t.loading}</p>
       {:else if filteredProviders.length === 0}
-        <p class="panel-status">未找到匹配服务</p>
+        <p class="panel-status">{t.noMatch}</p>
       {:else}
-        {#each filteredProviders as provider (provider.id)}
-          <Card
-            class="provider-card {provider.id === selectedProviderId ? 'is-active' : ''}"
+        {#each filteredProviders as provider, i (provider.id)}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="provider-card"
+            class:is-active={provider.id === selectedProviderId}
             onclick={() => selectProvider(provider.id)}
+            oncontextmenu={(e) => handleContextMenu(e, provider.id)}
           >
-            <CardContent class="provider-card-content">
-              <span class="provider-name">{provider.name}</span>
+            <span class="provider-name">{provider.name}</span>
+            <span class="provider-card-badges">
+              {#if i === 0}
+                <span class="provider-badge">{t.default}</span>
+              {/if}
               <span class="provider-state" class:enabled={provider.enabled}>
                 {provider.enabled ? 'ON' : 'OFF'}
               </span>
-            </CardContent>
-          </Card>
+            </span>
+          </div>
         {/each}
       {/if}
     </div>
 
     <div class="add-provider">
-      <Button
-        variant={'outline'}
-        class="w-full"
-        onclick={() => (showAddForm = !showAddForm)}
-      >
-        {showAddForm ? '收起' : '+ 添加'}
+      <Button variant="outline" class="w-full" onclick={() => (showAddForm = !showAddForm)}>
+        {showAddForm ? t.collapse : t.addBtn}
       </Button>
 
       {#if showAddForm}
         <div class="add-form">
           <label>
-            服务名称
-            <Input bind:value={newName} placeholder="例如：OpenAI 官方" />
+            {t.providerName}
+            <Input bind:value={newName} placeholder={t.providerNamePlaceholder} />
           </label>
 
           <label>
-            提供商类型
+            {t.providerType}
             <select
               class="form-input"
               value={newType}
@@ -439,194 +928,466 @@
           </label>
 
           <label>
-            API 地址
+            {t.apiAddress}
             <Input bind:value={newApiBase} placeholder="https://api.example.com/v1" />
           </label>
 
           <label>
-            API 密钥
-            <Input bind:value={newApiKey} type={'password'} placeholder="可选（Ollama 可留空）" />
+            {t.apiKey}
+            <Input bind:value={newApiKey} type="password" placeholder={t.apiKeyOptional} />
           </label>
 
           <label class="switch-row">
             <input type="checkbox" checked={newEnabled} onchange={(e) => newEnabled = (e.target as HTMLInputElement).checked} />
-            <span>创建后立即启用</span>
+            <span>{t.enableAfterCreate}</span>
           </label>
 
           <Button onclick={handleCreateProvider} disabled={creating} class="w-full">
-            {creating ? '添加中...' : '确认添加'}
+            {creating ? t.adding : t.confirmAdd}
           </Button>
         </div>
       {/if}
     </div>
   </section>
 
-  <section class=”provider-detail-panel”>
+  <!-- Detail Panel -->
+  <section class="detail-panel">
     {#if error}
-      <div class:alert={true} class:error={true}>{error}</div>
+      <div class="alert alert-error">{error}</div>
     {/if}
     {#if success}
-      <div class:alert={true} class:success={true}>{success}</div>
+      <div class="alert alert-success">{success}</div>
     {/if}
 
     {#if selectedProvider}
-      <div class=”detail-head”>
-        <h2>{selectedProvider.name}</h2>
-        <label class=”switch-row”>
-          <input type=”checkbox” checked={draftEnabled} onchange={(e) => draftEnabled = (e.target as HTMLInputElement).checked} />
-          <span>{draftEnabled ? '已启用' : '已停用'}</span>
+      <!-- Header -->
+      <div class="detail-header">
+        {#if editingName}
+          <input
+            class="editable-name-input"
+            bind:value={draftName}
+            onblur={finishEditName}
+            onkeydown={handleNameKeydown}
+            autofocus
+          />
+        {:else}
+          <h2 class="editable-name" onclick={startEditName} title={t.clickToEditName}>{draftName || selectedProvider.name}</h2>
+        {/if}
+        <label class="toggle-label">
+          <span class="toggle-text">{draftEnabled ? t.enabled : t.disabled}</span>
+          <span class="toggle-switch" class:is-on={draftEnabled} onclick={() => draftEnabled = !draftEnabled}>
+            <span class="toggle-thumb"></span>
+          </span>
         </label>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>基本配置</CardTitle>
-          <CardDescription>配置服务的基本信息和认证</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div class=”detail-grid”>
-            <label>
-              提供商类型
-              <select
-                class=”form-input”
-                value={draftType}
-                onchange={(event) => handleDraftTypeChange((event.target as HTMLSelectElement).value as ProviderType)}
-              >
-                {#each providerTypeOptions as option (option.value)}
-                  <option value={option.value}>{option.label}</option>
+      <!-- Provider Type -->
+      <div class="detail-section">
+        <label class="field-label">
+          {t.providerType}
+          <select
+            class="form-input"
+            value={draftType}
+            onchange={(event) => handleDraftTypeChange((event.target as HTMLSelectElement).value as ProviderType)}
+          >
+            {#each providerTypeOptions as option (option.value)}
+              <option value={option.value}>{option.label}</option>
+            {/each}
+          </select>
+        </label>
+      </div>
+
+      <!-- API Key -->
+      <div class="detail-section">
+        <label class="field-label">{t.apiKey}</label>
+        <div class="key-input-row">
+          <Input
+            bind:value={draftApiKey}
+            type={showApiKey ? 'text' : 'password'}
+            placeholder={t.apiKeyPlaceholder}
+          />
+          <Button variant="outline" size="sm" onclick={() => (showApiKey = !showApiKey)}>
+            {showApiKey ? t.hide : t.show}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={syncingModels[selectedProvider.id] || !draftEnabled}
+            onclick={() => handleSyncModels(selectedProvider.id)}
+          >
+            {syncingModels[selectedProvider.id] ? t.checking : t.check}
+          </Button>
+        </div>
+        <p class="field-hint">{t.apiKeyHint}</p>
+      </div>
+
+      <!-- API Address -->
+      <div class="detail-section">
+        <label class="field-label">
+          {t.apiAddress}
+          <Input bind:value={draftApiBase} placeholder="https://api.example.com/v1" />
+        </label>
+        {#if endpointPreview}
+          <p class="field-hint">{draftName || selectedProvider.name} → {endpointPreview}</p>
+        {/if}
+      </div>
+
+      <!-- Models -->
+      <div class="detail-section">
+        <div class="models-header">
+          <div class="models-title">
+            <span>{t.models}</span>
+            {#if selectedProvider.models.length > 0}
+              <span class="model-count">{t.modelsCount(selectedProvider.models.length)}</span>
+            {/if}
+          </div>
+          <div class="models-actions">
+            <Input type="search" bind:value={modelSearch} placeholder={t.searchModel} class="model-search" />
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => handleBatchModelVisibility(true)}
+              disabled={!draftEnabled || bulkUpdatingModels || selectedProvider.models.length === 0}
+            >
+              {t.selectAll}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => handleBatchModelVisibility(false)}
+              disabled={!draftEnabled || bulkUpdatingModels || selectedProvider.models.length === 0}
+            >
+              {t.deselectAll}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onclick={() => handleSyncModels(selectedProvider.id)}
+              disabled={syncingModels[selectedProvider.id] || !draftEnabled}
+            >
+              {syncingModels[selectedProvider.id] ? t.syncing : t.syncModels}
+            </Button>
+          </div>
+        </div>
+
+        {#if selectedProvider.models.length > 0}
+          <div class="model-grid-scroll">
+            <div class="model-grid">
+              {#each filteredModels as model (model.id)}
+                <button
+                  class="model-card"
+                  class:is-enabled={model.enabled}
+                  disabled={!draftEnabled || updatingModels[model.id] || bulkUpdatingModels}
+                  onclick={() => handleToggleModelVisibility(model.id, !model.enabled)}
+                >
+                  {model.name || model.id}
+                </button>
+              {/each}
+            </div>
+            {#if filteredModels.length === 0}
+              <p class="panel-status">{t.noMatchModels}</p>
+            {/if}
+          </div>
+        {:else}
+          <p class="panel-status">{t.noModels}</p>
+        {/if}
+
+        {#if !draftEnabled}
+          <p class="panel-status" style="margin-top: 0.35rem;">{t.disabledHint}</p>
+        {/if}
+      </div>
+
+    {:else}
+      <div class="empty-state">
+        <h3>{t.selectProvider}</h3>
+        <p>{t.selectProviderHint}</p>
+      </div>
+    {/if}
+  </section>
+  {:else if activeNav === '常规设置'}
+    <section class="general-panel">
+      <div class="detail-header">
+        <h2>{t.generalSettings}</h2>
+      </div>
+
+      <div class="detail-section">
+        <label class="field-label">
+          {t.language}
+          <select class="form-input" bind:value={language}>
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="detail-section">
+        <label class="field-label">
+          {t.proxyMode}
+          <select class="form-input" value={proxyMode}
+            onchange={(e) => handleProxyChange((e.target as HTMLSelectElement).value as 'system' | 'none')}>
+            <option value="system">{t.proxySystem}</option>
+            <option value="none">{t.proxyNone}</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="detail-section">
+        <div class="general-switch-row">
+          <span class="field-label">{t.autoLaunch}</span>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <span class="toggle-switch" class:is-on={autoLaunch} onclick={() => handleAutoLaunchChange(!autoLaunch)}>
+            <span class="toggle-thumb"></span>
+          </span>
+        </div>
+      </div>
+    </section>
+  {:else if activeNav === '显示设置'}
+    <section class="general-panel">
+      <div class="detail-header">
+        <h2>{t.displaySettings}</h2>
+      </div>
+
+      <div class="detail-section">
+        <span class="field-label">{t.themeColor}</span>
+        <div class="color-swatches">
+          {#each themeColors as color, i}
+            <button
+              class="color-swatch"
+              class:is-selected={selectedColorIndex === i}
+              style="background: {color.primary};"
+              title={language === 'en' ? color.nameEn : color.name}
+              onclick={() => applyThemeColor(i)}
+            >
+              {#if selectedColorIndex === i}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+              {/if}
+            </button>
+          {/each}
+        </div>
+      </div>
+
+      <div class="detail-section">
+        <div class="zoom-header">
+          <span class="field-label">{t.zoom}</span>
+          <span class="zoom-value">{t.zoomValue(zoomLevel)}</span>
+        </div>
+        <Slider type="single" bind:value={zoomLevel} min={50} max={150} step={5} class="zoom-slider" />
+      </div>
+
+      <div class="detail-section">
+        <div class="general-switch-row">
+          <span class="field-label">{t.autoRename}</span>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <span class="toggle-switch" class:is-on={autoRename} onclick={() => { autoRename = !autoRename; }}>
+            <span class="toggle-thumb"></span>
+          </span>
+        </div>
+        <p class="field-hint">{t.autoRenameHint}</p>
+        {#if autoRename}
+          <div style="margin-top: 0.6rem;">
+            <label class="field-label">
+              {t.autoRenameModel}
+              <select class="form-input" bind:value={autoRenameModelId}>
+                {#each allModelGroups as group}
+                  <optgroup label={group.providerName}>
+                    {#each group.models as model}
+                      <option value={model.id}>{model.name || model.id}</option>
+                    {/each}
+                  </optgroup>
                 {/each}
               </select>
             </label>
-
-            <label>
-              服务名称
-              <Input bind:value={draftName} placeholder=”服务名称” />
-            </label>
-
-            <label class=”full-width”>
-              API 密钥
-              <div class=”key-input-wrap”>
-                <Input
-                  bind:value={draftApiKey}
-                  type={showApiKey ? 'text' : 'password'}
-                  placeholder={'输入 API 密钥'}
-                />
-                <Button
-                  variant={'outline'}
-                  size={'sm'}
-                  onclick={() => (showApiKey = !showApiKey)}
-                >
-                  {showApiKey ? '隐藏' : '显示'}
-                </Button>
-                <Button
-                  variant={'outline'}
-                  size={'sm'}
-                  disabled={syncingModels[selectedProvider.id] || !draftEnabled}
-                  onclick={() => handleSyncModels(selectedProvider.id)}
-                >
-                  {syncingModels[selectedProvider.id] ? '检测中...' : '检测'}
-                </Button>
-              </div>
-              <small>多个密钥可用英文逗号分隔。</small>
-            </label>
-
-            <label class=”full-width”>
-              API 地址
-              <Input bind:value={draftApiBase} placeholder=”https://api.example.com/v1” />
-              {#if endpointPreview}
-                <small>预览接口: {endpointPreview}</small>
-              {/if}
-            </label>
           </div>
-        </CardContent>
-      </Card>
-
-      <Card class=”mt-4”>
-        <CardHeader>
-          <div class=”models-head”>
-            <div>
-              <CardTitle>模型可见性</CardTitle>
-              <CardDescription>管理该服务下的模型显示状态</CardDescription>
-            </div>
-            <div class=”models-actions”>
-              <Button
-                variant={'outline'}
-                size={'sm'}
-                onclick={() => handleBatchModelVisibility(true)}
-                disabled={!draftEnabled || bulkUpdatingModels || selectedProvider.models.length === 0}
-              >
-                全选
-              </Button>
-              <Button
-                variant={'outline'}
-                size={'sm'}
-                onclick={() => handleBatchModelVisibility(false)}
-                disabled={!draftEnabled || bulkUpdatingModels || selectedProvider.models.length === 0}
-              >
-                全不选
-              </Button>
-              <Button
-                variant={'outline'}
-                size={'sm'}
-                onclick={() => handleSyncModels(selectedProvider.id)}
-                disabled={syncingModels[selectedProvider.id] || !draftEnabled}
-              >
-                {syncingModels[selectedProvider.id] ? '同步中...' : '同步模型'}
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {#if selectedProvider.models.length > 0}
-            <ul class=”model-list”>
-              {#each selectedProvider.models as model (model.id)}
-                <li class=”model-item”>
-                  <label class=”model-toggle”>
-                    <input
-                      type=”checkbox”
-                      checked={model.enabled}
-                      disabled={!draftEnabled || updatingModels[model.id] || bulkUpdatingModels}
-                      onchange={(event) =>
-                        handleToggleModelVisibility(
-                          model.id,
-                          (event.target as HTMLInputElement).checked,
-                        )}
-                    />
-                    <span class:model-muted={!model.enabled}>{model.name || model.id}</span>
-                  </label>
-                </li>
-              {/each}
-            </ul>
-          {:else}
-            <p class=”panel-status”>暂无模型，点击”同步模型”拉取。</p>
-          {/if}
-
-          {#if !draftEnabled}
-            <p class:panel-status={true} class:mt-1={true}>当前服务已停用，模型勾选状态会保留但不会在聊天中显示。</p>
-          {/if}
-        </CardContent>
-      </Card>
-
-      <div class=”detail-actions”>
-        <Button disabled={!isDirty || saving} onclick={handleSaveSelected}>
-          {saving ? '保存中...' : '保存'}
-        </Button>
-        <Button variant={'destructive'} disabled={deleting} onclick={handleDeleteSelected}>
-          {deleting ? '删除中...' : '删除'}
-        </Button>
+        {/if}
       </div>
-    {:else}
-      <Card>
-        <CardContent class=”empty-state”>
-          <h3>请选择一个服务</h3>
-          <p>你可以在中间列表中选择，或先点击 “+ 添加” 创建新服务。</p>
-        </CardContent>
-      </Card>
-    {/if}
-  </section>
+
+      <div class="detail-section">
+        <div class="general-switch-row">
+          <span class="field-label">{t.autoCompress}</span>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <span class="toggle-switch" class:is-on={autoCompress} onclick={() => { autoCompress = !autoCompress; }}>
+            <span class="toggle-thumb"></span>
+          </span>
+        </div>
+        <p class="field-hint">{t.autoCompressHint}</p>
+        {#if autoCompress}
+          <div style="margin-top: 0.6rem; display: flex; flex-direction: column; gap: 0.5rem;">
+            <label class="field-label">
+              {t.autoCompressModel}
+              <select class="form-input" bind:value={autoCompressModelId}>
+                {#each allModelGroups as group}
+                  <optgroup label={group.providerName}>
+                    {#each group.models as model}
+                      <option value={model.id}>{model.name || model.id}</option>
+                    {/each}
+                  </optgroup>
+                {/each}
+              </select>
+            </label>
+            <label class="field-label">
+              {t.autoCompressThreshold}
+              <input class="form-input" type="number" bind:value={autoCompressThreshold} min={1000} step={1000} />
+            </label>
+          </div>
+        {/if}
+      </div>
+    </section>
+  {:else if activeNav === '数据设置'}
+    <section class="general-panel">
+      <div class="detail-header">
+        <h2>{t.dataSettings}</h2>
+      </div>
+
+      <!-- 数据备份 -->
+      <div class="detail-section">
+        <span class="section-subtitle">{t.backupSection}</span>
+
+        <div class="data-row">
+          <span class="data-row-label">{t.backupDir}</span>
+          <div class="data-row-content">
+            <span class="data-path">{backupDir || '—'}</span>
+            <Button variant="outline" size="sm" onclick={handlePickBackupDir}>{t.browse}</Button>
+            <Button variant="outline" size="sm" onclick={handleClearBackupDir}>{t.clear}</Button>
+          </div>
+        </div>
+
+        <div class="data-row">
+          <span class="data-row-label">{t.backupRestore}</span>
+          <div class="data-row-content">
+            <Button variant="outline" size="sm" onclick={handleLocalBackup} disabled={backingUp}>
+              {backingUp ? (language === 'zh' ? '备份中…' : 'Backing up…') : t.localBackup}
+            </Button>
+            <Button variant="outline" size="sm">{t.backupManager}</Button>
+          </div>
+        </div>
+
+        <div class="data-row">
+          <span class="data-row-label">{t.autoBackup}</span>
+          <div class="data-row-content">
+            <select class="form-input form-input-sm" bind:value={autoBackup}>
+              <option value="off">{t.autoBackupOff}</option>
+              <option value="daily">{t.autoBackupDaily}</option>
+              <option value="weekly">{t.autoBackupWeekly}</option>
+              <option value="monthly">{t.autoBackupMonthly}</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="data-row">
+          <span class="data-row-label">{t.maxBackups}</span>
+          <div class="data-row-content">
+            <Input type="number" bind:value={maxBackups} min={1} max={99} class="input-sm" />
+          </div>
+        </div>
+
+        <div class="data-row">
+          <span class="data-row-label">{t.compactBackup}</span>
+          <div class="data-row-content">
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <span class="toggle-switch" class:is-on={compactBackup} onclick={() => compactBackup = !compactBackup}>
+              <span class="toggle-thumb"></span>
+            </span>
+          </div>
+        </div>
+        <p class="field-hint">{t.compactBackupHint}</p>
+      </div>
+
+      <!-- 数据目录 -->
+      <div class="detail-section">
+        <span class="section-subtitle">{t.dataDir}</span>
+
+        <div class="data-row">
+          <span class="data-row-label">{t.clearCache}</span>
+          <div class="data-row-content">
+            <span class="data-value">{cacheSize}</span>
+            <Button variant="outline" size="sm" onclick={handleClearCache} disabled={clearingCache}>
+              {clearingCache ? (language === 'zh' ? '清除中…' : 'Clearing…') : t.clearCache}
+            </Button>
+          </div>
+        </div>
+
+        <div class="data-row">
+          <span class="data-row-label">{t.resetData}</span>
+          <div class="data-row-content">
+            <Button variant="destructive" size="sm" onclick={handleResetData} disabled={resettingData}>
+              {resettingData ? (language === 'zh' ? '重置中…' : 'Resetting…') : t.resetData}
+            </Button>
+          </div>
+        </div>
+        <p class="field-hint">{t.resetDataHint}</p>
+      </div>
+    </section>
+  {:else if activeNav === '关于我们'}
+    <section class="general-panel">
+      <div class="detail-header">
+        <h2>{t.about}</h2>
+      </div>
+
+      <div class="about-hero">
+        <div class="about-title-block">
+          <span class="about-app-name">Orion Chat</span>
+          <span class="about-tagline">{t.tagline}</span>
+          <span class="about-version">{t.version} {appVersion || '—'}</span>
+        </div>
+        <a
+          class="github-badge"
+          href="https://github.com/oooyuy92/orion-chat-rs"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="GitHub"
+        >
+          <svg height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.385-1.335-1.755-1.335-1.755-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12z"/>
+          </svg>
+          <span>GitHub</span>
+        </a>
+      </div>
+
+      <div class="detail-section">
+        <div class="general-switch-row">
+          <span class="field-label">{t.autoUpdate}</span>
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <span class="toggle-switch" class:is-on={autoUpdate} onclick={() => { autoUpdate = !autoUpdate; }}>
+            <span class="toggle-thumb"></span>
+          </span>
+        </div>
+      </div>
+
+      <div class="detail-section">
+        <div class="about-update-row">
+          <Button variant="outline" size="sm" onclick={handleCheckUpdate} disabled={checkingUpdate}>
+            {checkingUpdate ? t.checkingUpdate : t.checkUpdate}
+          </Button>
+          {#if updateStatus === 'latest'}
+            <span class="update-status">{t.upToDate}</span>
+          {/if}
+        </div>
+      </div>
+    </section>
+  {:else}
+    <section class="placeholder-panel">
+      <div class="empty-state">
+        <h3>{activeNav}</h3>
+        <p>{t.featureWip}</p>
+      </div>
+    </section>
+  {/if}
 </div>
 
+{#if contextMenu}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="context-overlay" onclick={closeContextMenu} oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}>
+    <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
+      {#if providers.length > 0 && providers[0].id !== contextMenu.providerId}
+        <button class="context-item" onclick={handleSetDefault}>{t.setDefault}</button>
+      {/if}
+      <button class="context-item danger" onclick={handleContextDelete}>{t.delete}</button>
+    </div>
+  </div>
+{/if}
+
 <style>
+  /* ── Root Layout ── */
   .settings-root {
     height: 100%;
     min-height: 0;
@@ -636,17 +1397,13 @@
     background: var(--background);
   }
 
-  .settings-nav,
-  .provider-list-panel,
-  .provider-detail-panel {
-    min-height: 0;
-  }
-
+  /* ── Left Nav ── */
   .settings-nav {
     border-right: 1px solid var(--border);
-    background: var(--sidebar-bg);
+    background: var(--sidebar);
     padding: 0.9rem 0.65rem;
     overflow-y: auto;
+    min-height: 0;
   }
 
   .nav-group {
@@ -662,9 +1419,11 @@
 
   .nav-group h3 {
     margin: 0 0 0.45rem;
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     color: var(--muted-foreground);
     font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
   }
 
   .nav-item {
@@ -673,26 +1432,29 @@
     background: transparent;
     color: var(--foreground);
     border: none;
-    border-radius: 0.55rem;
+    border-radius: 0.5rem;
     padding: 0.4rem 0.55rem;
     font-size: 0.82rem;
     cursor: pointer;
+    transition: background 0.12s;
   }
 
   .nav-item:hover {
-    background: var(--sidebar-hover);
+    background: var(--muted);
   }
 
   .nav-item.is-active {
-    background: var(--sidebar-active);
+    background: var(--muted);
     font-weight: 600;
   }
 
+  /* ── Provider List Panel ── */
   .provider-list-panel {
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     background: var(--card);
+    min-height: 0;
   }
 
   .panel-head {
@@ -706,53 +1468,41 @@
     font-weight: 650;
   }
 
-  .form-input {
-    width: 100%;
-    border: 1px solid var(--border);
-    border-radius: 0.6rem;
-    background: var(--background);
-    color: var(--foreground);
-    padding: 0.5rem 0.6rem;
-    font-size: 0.84rem;
-    box-sizing: border-box;
-    outline: none;
-  }
-
-  .form-input:focus {
-    border-color: #c4c4cc;
-  }
-
   .provider-list-scroll {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 0.6rem;
+    padding: 0.5rem;
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 0.25rem;
   }
 
-  :global(.provider-card) {
-    cursor: pointer;
-    transition: all 0.15s ease;
-    border: 1px solid transparent;
-  }
-
-  :global(.provider-card:hover) {
-    background: var(--muted);
-  }
-
-  :global(.provider-card.is-active) {
-    background: var(--muted);
-    border-color: var(--border);
-  }
-
-  :global(.provider-card-content) {
+  .provider-card {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.4rem;
-    padding: 0.48rem 0.52rem !important;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.6rem;
+    font-size: 0.84rem;
+    cursor: pointer;
+    color: var(--foreground);
+    user-select: none;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .provider-card:hover {
+    background: var(--muted);
+  }
+
+  .provider-card.is-active {
+    background: var(--muted);
+    border-color: var(--border);
   }
 
   .provider-name {
@@ -760,32 +1510,43 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 0.84rem;
-    text-align: left;
   }
 
   .provider-state {
-    font-size: 0.68rem;
+    font-size: 0.66rem;
     border-radius: 999px;
-    padding: 0.08rem 0.34rem;
+    padding: 0.1rem 0.36rem;
     color: #9f1d1d;
     background: #fee2e2;
     border: 1px solid #fecaca;
+    flex-shrink: 0;
   }
 
   .provider-state.enabled {
     color: #166534;
     background: #dcfce7;
-    border: 1px solid #bbf7d0;
+    border-color: #bbf7d0;
+  }
+
+  .provider-badge {
+    font-size: 0.66rem;
+    border-radius: 999px;
+    padding: 0.1rem 0.36rem;
+    color: var(--primary-foreground);
+    background: var(--primary);
+    flex-shrink: 0;
+  }
+
+  .provider-card-badges {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-shrink: 0;
   }
 
   .add-provider {
     border-top: 1px solid var(--border);
     padding: 0.6rem;
-  }
-
-  :global(.w-full) {
-    width: 100%;
   }
 
   .add-form {
@@ -795,34 +1556,12 @@
     gap: 0.5rem;
   }
 
-  .add-form label,
-  .detail-grid label {
+  .add-form label {
     display: flex;
     flex-direction: column;
     gap: 0.28rem;
     font-size: 0.78rem;
     color: var(--muted-foreground);
-  }
-
-  .provider-detail-panel {
-    padding: 0.95rem;
-    overflow-y: auto;
-  }
-
-  .detail-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.6rem;
-    margin-bottom: 0.7rem;
-    padding-bottom: 0.7rem;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .detail-head h2 {
-    margin: 0;
-    font-size: 1rem;
-    font-weight: 700;
   }
 
   .switch-row {
@@ -833,103 +1572,284 @@
     color: var(--muted-foreground);
   }
 
-  .detail-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  /* ── Detail Panel ── */
+  .detail-panel {
+    padding: 1.2rem 1.5rem;
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .detail-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     gap: 0.6rem;
+    margin-bottom: 1.2rem;
+    padding-bottom: 0.8rem;
+    border-bottom: 1px solid var(--border);
   }
 
-  .detail-grid .full-width {
-    grid-column: 1 / -1;
+  .detail-header h2 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 700;
   }
 
-  .key-input-wrap {
+  /* Editable Name */
+  .editable-name {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 700;
+    cursor: pointer;
+    border-radius: 0.35rem;
+    padding: 0.1rem 0.3rem;
+    margin: -0.1rem -0.3rem;
+    transition: background 0.12s;
+  }
+
+  .editable-name:hover {
+    background: var(--muted);
+  }
+
+  .editable-name-input {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--foreground);
+    background: var(--background);
+    border: 1px solid var(--primary);
+    border-radius: 0.35rem;
+    padding: 0.1rem 0.3rem;
+    outline: none;
+    width: auto;
+    min-width: 8rem;
+  }
+
+  /* Toggle Switch */
+  .toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .toggle-text {
+    font-size: 0.78rem;
+    color: var(--muted-foreground);
+  }
+
+  .toggle-switch {
+    position: relative;
+    width: 2.4rem;
+    height: 1.3rem;
+    background: var(--muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .toggle-switch.is-on {
+    background: #22c55e;
+    border-color: #22c55e;
+  }
+
+  .toggle-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 0.9rem;
+    height: 0.9rem;
+    background: white;
+    border-radius: 50%;
+    transition: transform 0.2s;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+  }
+
+  .toggle-switch.is-on .toggle-thumb {
+    transform: translateX(1.1rem);
+  }
+
+  /* Detail Sections */
+  .detail-section {
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .detail-section:last-of-type {
+    border-bottom: none;
+  }
+
+  .field-label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.32rem;
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--foreground);
+  }
+
+  .field-hint {
+    margin: 0.3rem 0 0;
+    font-size: 0.72rem;
+    color: var(--muted-foreground);
+  }
+
+  .key-input-row {
     display: grid;
     grid-template-columns: 1fr auto auto;
     gap: 0.35rem;
     align-items: center;
+    margin-top: 0.32rem;
   }
 
-  small {
-    color: var(--muted-foreground);
-    font-size: 0.72rem;
+  /* Form Input (native select) */
+  .form-input {
+    width: 100%;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--background);
+    color: var(--foreground);
+    padding: 0.5rem 0.6rem;
+    font-size: 0.84rem;
+    box-sizing: border-box;
+    outline: none;
+    transition: border-color 0.15s;
   }
 
-  :global(.mt-4) {
-    margin-top: 1rem;
+  .form-input:focus {
+    border-color: var(--ring);
   }
 
-  .models-head {
+  /* Models Section */
+  .models-header {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
+    margin-bottom: 0.65rem;
+  }
+
+  .models-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.88rem;
+    font-weight: 600;
+  }
+
+  .model-count {
+    font-size: 0.72rem;
+    font-weight: 400;
+    color: var(--muted-foreground);
+    background: var(--muted);
+    border-radius: 999px;
+    padding: 0.12rem 0.5rem;
   }
 
   .models-actions {
-    display: inline-flex;
+    display: flex;
     gap: 0.35rem;
     align-items: center;
     flex-shrink: 0;
   }
 
-  .model-list {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
-    gap: 0.36rem;
+  :global(.model-search) {
+    width: 10rem !important;
+    height: 1.8rem !important;
+    font-size: 0.78rem !important;
   }
 
-  .model-item {
+  .model-grid-scroll {
+    max-height: 20rem;
+    overflow-y: auto;
     border: 1px solid var(--border);
     border-radius: 0.5rem;
-    padding: 0.34rem 0.5rem;
-    font-size: 0.78rem;
-    color: var(--foreground);
+    padding: 0.4rem;
+  }
+
+  .model-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.4rem;
+  }
+
+  .model-card {
+    text-align: left;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.7rem;
+    font-size: 0.8rem;
+    color: var(--muted-foreground);
     background: var(--muted);
+    cursor: pointer;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    transition: all 0.15s;
   }
 
-  .model-toggle {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
+  .model-card:hover:not(:disabled) {
+    border-color: var(--primary);
+  }
+
+  .model-card.is-enabled {
+    background: var(--primary);
+    color: var(--primary-foreground);
+    border-color: var(--primary);
+  }
+
+  .model-card:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  /* Context Menu */
+  .context-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+  }
+
+  .context-menu {
+    position: fixed;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 0.25rem;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    min-width: 7rem;
+    z-index: 101;
+  }
+
+  .context-item {
+    display: block;
     width: 100%;
-    min-width: 0;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-radius: 0.35rem;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.82rem;
     cursor: pointer;
+    color: var(--foreground);
+    transition: background 0.1s;
   }
 
-  .model-toggle input {
-    margin: 0;
-    cursor: pointer;
+  .context-item:hover {
+    background: var(--muted);
   }
 
-  .model-toggle span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
+  .context-item.danger {
+    color: #dc2626;
   }
 
-  .model-muted {
-    color: var(--muted-foreground);
-    text-decoration: line-through;
+  .context-item.danger:hover {
+    background: #fef2f2;
   }
 
-  .mt-1 {
-    margin-top: 0.35rem;
-  }
-
-  .detail-actions {
-    margin-top: 0.9rem;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
+  /* Shared */
   .panel-status {
     margin: 0;
     font-size: 0.8rem;
@@ -938,27 +1858,34 @@
 
   .alert {
     border: 1px solid var(--border);
-    border-radius: 0.6rem;
-    padding: 0.5rem 0.62rem;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.65rem;
     margin-bottom: 0.7rem;
     font-size: 0.8rem;
   }
 
-  .alert.error {
+  .alert-error {
     border-color: #fecaca;
     background: #fef2f2;
     color: #991b1b;
   }
 
-  .alert.success {
+  .alert-success {
     border-color: #bbf7d0;
     background: #f0fdf4;
     color: #166534;
   }
 
-  :global(.empty-state) {
-    padding: 2rem 1rem !important;
+  .empty-state {
+    padding: 3rem 1rem;
     text-align: center;
+  }
+
+  .placeholder-panel {
+    grid-column: 2 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .empty-state h3 {
@@ -972,9 +1899,199 @@
     color: var(--muted-foreground);
   }
 
+  /* ── General Settings Panel ── */
+  .general-panel {
+    grid-column: 2 / -1;
+    padding: 1.2rem 1.5rem;
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .general-switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  /* ── Color Swatches ── */
+  .color-swatches {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .color-swatch {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    transition: border-color 0.15s, transform 0.15s;
+  }
+
+  .color-swatch:hover {
+    transform: scale(1.12);
+  }
+
+  .color-swatch.is-selected {
+    border-color: var(--foreground);
+    box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--foreground);
+  }
+
+  /* ── Zoom ── */
+  .zoom-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.6rem;
+  }
+
+  .zoom-value {
+    font-size: 0.82rem;
+    font-weight: 500;
+    color: var(--muted-foreground);
+  }
+
+  :global(.zoom-slider) {
+    margin-top: 0.25rem;
+  }
+
+  /* ── Data Settings ── */
+  .section-subtitle {
+    display: block;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--foreground);
+    margin-bottom: 0.7rem;
+  }
+
+  .data-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.45rem 0;
+  }
+
+  .data-row-label {
+    font-size: 0.82rem;
+    color: var(--foreground);
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .data-row-content {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
+  }
+
+  .data-path {
+    font-size: 0.75rem;
+    color: var(--muted-foreground);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 22rem;
+  }
+
+  .data-value {
+    font-size: 0.8rem;
+    color: var(--muted-foreground);
+  }
+
+  .form-input-sm {
+    width: 8rem;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.8rem;
+  }
+
+  :global(.input-sm) {
+    width: 5rem !important;
+    height: 1.8rem !important;
+    font-size: 0.8rem !important;
+  }
+
+  /* ── About ── */
+  .about-hero {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    padding: 1.5rem 0 1rem;
+    gap: 1rem;
+  }
+
+  .about-title-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .about-app-name {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--foreground);
+    letter-spacing: -0.01em;
+  }
+
+  .about-tagline {
+    font-size: 0.88rem;
+    color: var(--muted-foreground);
+  }
+
+  .about-version {
+    font-size: 0.78rem;
+    color: var(--muted-foreground);
+    opacity: 0.7;
+  }
+
+  .github-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.38rem 0.85rem;
+    border-radius: 0.4rem;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--foreground);
+    font-size: 0.82rem;
+    font-weight: 500;
+    text-decoration: none;
+    transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  .github-badge:hover {
+    background: var(--accent);
+    border-color: var(--primary);
+  }
+
+  .about-update-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .update-status {
+    font-size: 0.82rem;
+    color: var(--muted-foreground);
+  }
+
+  /* Responsive */
   @media (max-width: 1160px) {
     .settings-root {
       grid-template-columns: 11.5rem 12rem minmax(0, 1fr);
+    }
+
+    .model-grid {
+      grid-template-columns: repeat(2, 1fr);
     }
   }
 
@@ -997,12 +2114,12 @@
       max-height: 20rem;
     }
 
-    .detail-grid {
+    .key-input-row {
       grid-template-columns: 1fr;
     }
 
-    .key-input-wrap {
-      grid-template-columns: 1fr;
+    .model-grid {
+      grid-template-columns: repeat(2, 1fr);
     }
   }
 </style>

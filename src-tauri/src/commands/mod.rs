@@ -4,3 +4,4 @@ pub mod conversation;
 pub mod export;
 pub mod provider;
 pub mod search;
+pub mod settings;

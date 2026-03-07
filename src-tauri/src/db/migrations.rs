@@ -63,7 +63,11 @@ pub fn run(conn: &Connection) -> AppResult<()> {
             token_prompt INTEGER,
             token_completion INTEGER,
             status TEXT NOT NULL DEFAULT 'done',
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            deleted_at TEXT,
+            version_group_id TEXT,
+            version_number INTEGER NOT NULL DEFAULT 1,
+            is_active_version INTEGER NOT NULL DEFAULT 1
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -79,7 +83,33 @@ pub fn run(conn: &Connection) -> AppResult<()> {
         CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
             INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
         END;
+
+        CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE OF content ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+            INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+        END;
         ",
     )?;
+
+    // Add deleted_at column for existing databases (idempotent)
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN deleted_at TEXT", []);
+
+    // Add version columns for existing databases (idempotent)
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN version_group_id TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE messages ADD COLUMN version_number INTEGER NOT NULL DEFAULT 1",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE messages ADD COLUMN is_active_version INTEGER NOT NULL DEFAULT 1",
+        [],
+    );
+
+    // Purge soft-deleted messages older than 3 days
+    conn.execute(
+        "DELETE FROM messages WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', '-3 days')",
+        [],
+    )?;
+
     Ok(())
 }

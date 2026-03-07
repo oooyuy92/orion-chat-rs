@@ -4,7 +4,7 @@
 	import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
 </script>
 
-<div class="flex h-full flex-col">
+<div class="flex h-full w-full flex-col">
 	<header class="border-b px-6 py-4">
 		<div class="flex items-center gap-4">
 			<Button variant="ghost" size="icon" href="/">

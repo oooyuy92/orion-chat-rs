@@ -2,7 +2,23 @@
   import type { Message } from '$lib/types';
   import MessageBubble from './MessageBubble.svelte';
 
-  let { messages }: { messages: Message[] } = $props();
+  type MessageAction =
+    | { type: 'delete'; messageId: string }
+    | { type: 'resend'; messageId: string }
+    | { type: 'editResend'; messageId: string; content: string }
+    | { type: 'regenerate'; messageId: string; modelId: string | null }
+    | { type: 'generateVersion'; messageId: string }
+    | { type: 'switchVersion'; versionGroupId: string; versionNumber: number };
+
+  let {
+    messages,
+    onAction,
+    disabled = false,
+  }: {
+    messages: Message[];
+    onAction?: (action: MessageAction) => void;
+    disabled?: boolean;
+  } = $props();
 
   let container: HTMLDivElement | undefined = $state();
 
@@ -22,7 +38,7 @@
       </div>
     {:else}
       {#each messages as message (message.id)}
-        <MessageBubble {message} />
+        <MessageBubble {message} {onAction} {disabled} />
       {/each}
     {/if}
   </div>
@@ -33,7 +49,25 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    border-bottom: 1px solid var(--border);
+    scrollbar-width: thin;
+    scrollbar-color: oklch(0.85 0 0) transparent;
+  }
+
+  .conversation-viewport::-webkit-scrollbar {
+    width: 2px;
+  }
+
+  .conversation-viewport::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .conversation-viewport::-webkit-scrollbar-thumb {
+    background: oklch(0.85 0 0);
+    border-radius: 9999px;
+  }
+
+  .conversation-viewport::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.72 0 0);
   }
 
   .conversation-stack {

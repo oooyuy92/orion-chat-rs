@@ -65,15 +65,36 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::chat::send_message,
+            commands::chat::resend_message,
             commands::chat::stop_generation,
+            commands::chat::generate_version,
+            commands::chat::regenerate_message,
+            commands::chat::compress_conversation,
             commands::conversation::create_conversation,
             commands::conversation::list_conversations,
             commands::conversation::update_conversation_title,
             commands::conversation::delete_conversation,
+            commands::conversation::pin_conversation,
+            commands::conversation::generate_conversation_title,
             commands::conversation::get_messages,
+            commands::conversation::delete_message,
+            commands::conversation::restore_message,
+            commands::conversation::delete_messages_after,
+            commands::conversation::delete_messages_from,
+            commands::conversation::update_message_content,
+            commands::conversation::switch_version,
+            commands::conversation::list_versions,
+            commands::conversation::get_version_models,
             commands::provider::add_provider,
             commands::provider::list_providers,
             commands::provider::update_provider,
@@ -88,6 +109,17 @@ pub fn run() {
             commands::search::search_messages,
             commands::export::export_conversation_markdown,
             commands::export::export_conversation_json,
+            commands::settings::get_app_paths,
+            commands::settings::open_path,
+            commands::settings::pick_directory,
+            commands::settings::get_cache_size,
+            commands::settings::clear_cache,
+            commands::settings::reset_app_data,
+            commands::settings::local_backup,
+            commands::settings::get_autostart_enabled,
+            commands::settings::set_autostart_enabled,
+            commands::settings::set_proxy_mode,
+            commands::settings::get_proxy_mode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

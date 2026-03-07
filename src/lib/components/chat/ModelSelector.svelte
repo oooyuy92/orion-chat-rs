@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { ModelGroup } from '$lib/types';
-  import { Button } from '$lib/components/ui/button';
   import {
     DropdownMenu,
     DropdownMenuContent,
@@ -38,18 +37,16 @@
 <DropdownMenu>
   <DropdownMenuTrigger>
     {#snippet child({ props })}
-      <Button {...props} variant="outline" class="w-full justify-between">
-        <span class="flex items-center gap-2">
-          <span class="text-muted-foreground text-xs">*</span>
-          <span class="text-sm">
-            {selectedModel()?.name || 'Select model'}
-          </span>
-        </span>
-        <ChevronDownIcon class="h-4 w-4 opacity-50" />
-      </Button>
+      <button
+        {...props}
+        class="model-trigger"
+      >
+        <span class="model-name">{selectedModel()?.name || 'Select model'}</span>
+        <ChevronDownIcon class="h-3.5 w-3.5 opacity-50" />
+      </button>
     {/snippet}
   </DropdownMenuTrigger>
-  <DropdownMenuContent class="w-[300px]">
+  <DropdownMenuContent class="w-[300px] bg-popover border border-border shadow-md">
     {#each modelGroups as group, index (group.providerId)}
       {#if index > 0}
         <DropdownMenuSeparator />
@@ -66,3 +63,31 @@
     {/each}
   </DropdownMenuContent>
 </DropdownMenu>
+
+<style>
+  .model-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border: 1px solid var(--border);
+    background: var(--background);
+    color: var(--foreground);
+    border-radius: 0.5rem;
+    padding: 0.3rem 0.6rem;
+    font-size: 0.875rem;
+    line-height: 1.4;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+  }
+
+  .model-trigger:hover {
+    background: var(--muted);
+  }
+
+  .model-name {
+    max-width: 16rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+</style>

@@ -1,24 +1,40 @@
 <script lang="ts">
+  import type { ModelGroup, ProviderType } from '$lib/types';
   import ModelSelector from './ModelSelector.svelte';
-  import type { ModelGroup } from '$lib/types';
+  import ModelParamsPopover from './ModelParamsPopover.svelte';
+
+  const PASTE_THRESHOLD = 500;
 
   let {
     disabled = false,
     disabledReason = '',
     onSend,
+    onStop,
     suggestions = [],
     modelGroups = [],
-    selectedModel = $bindable(''),
+    selectedModelId = $bindable(''),
   }: {
     disabled?: boolean;
     disabledReason?: string;
     onSend: (content: string) => void;
+    onStop?: () => void;
     suggestions?: string[];
     modelGroups?: ModelGroup[];
-    selectedModel?: string;
+    selectedModelId?: string;
   } = $props();
 
-  let text = $state('');
+  let editorEl: HTMLDivElement | undefined = $state();
+  let hasContent = $state(false);
+  const pastedBlocks = new Map<string, string>();
+
+  const currentProviderType = $derived.by(() => {
+    for (const group of modelGroups) {
+      if (group.models.some((m) => m.id === selectedModelId)) {
+        return group.providerType;
+      }
+    }
+    return 'openaiCompat' as ProviderType;
+  });
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -27,22 +43,92 @@
     }
   }
 
-  function submit() {
-    const trimmed = text.trim();
-    if (!trimmed || disabled) {
-      return;
-    }
+  function handlePaste(event: ClipboardEvent) {
+    event.preventDefault();
+    const text = event.clipboardData?.getData('text/plain') ?? '';
+    if (!text) return;
 
-    onSend(trimmed);
-    text = '';
+    if (text.length > PASTE_THRESHOLD) {
+      const id = crypto.randomUUID();
+      pastedBlocks.set(id, text);
+
+      const span = document.createElement('span');
+      span.className = 'paste-ref';
+      span.contentEditable = 'false';
+      span.dataset.pasteId = id;
+      span.textContent = `[${text.length} 字符]`;
+
+      insertNodeAtCursor(span);
+    } else {
+      document.execCommand('insertText', false, text);
+    }
+    updateHasContent();
+  }
+
+  function insertNodeAtCursor(node: Node) {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0) return;
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  function handleInput() {
+    updateHasContent();
+  }
+
+  function updateHasContent() {
+    hasContent = !!(editorEl?.textContent?.trim());
+  }
+
+  function getContent(): string {
+    if (!editorEl) return '';
+    let result = '';
+    function walk(node: Node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        result += node.textContent ?? '';
+      } else if (node.nodeType === Node.ELEMENT_NODE) {
+        const el = node as HTMLElement;
+        if (el.classList.contains('paste-ref')) {
+          const id = el.dataset.pasteId;
+          if (id && pastedBlocks.has(id)) {
+            const text = pastedBlocks.get(id)!;
+            result += `<<paste:${text.length}>>${text}<</paste>>`;
+          } else {
+            result += el.textContent ?? '';
+          }
+        } else if (el.tagName === 'BR') {
+          result += '\n';
+        } else if (el.tagName === 'DIV' || el.tagName === 'P') {
+          if (result.length > 0 && !result.endsWith('\n')) {
+            result += '\n';
+          }
+          el.childNodes.forEach((child) => walk(child));
+        } else {
+          el.childNodes.forEach((child) => walk(child));
+        }
+      }
+    }
+    editorEl.childNodes.forEach((child) => walk(child));
+    return result;
+  }
+
+  function submit() {
+    const content = getContent().trim();
+    if (!content || disabled) return;
+    onSend(content);
+    if (editorEl) editorEl.innerHTML = '';
+    pastedBlocks.clear();
+    hasContent = false;
   }
 
   function submitSuggestion(prompt: string) {
-    if (disabled) {
-      return;
-    }
-
-    text = prompt;
+    if (disabled) return;
+    if (editorEl) editorEl.textContent = prompt;
     submit();
   }
 </script>
@@ -62,46 +148,52 @@
     </div>
   {/if}
 
-  <!-- InputGroup structure -->
+  <div class="model-row">
+    <ModelSelector {modelGroups} bind:selected={selectedModelId} />
+    <ModelParamsPopover modelId={selectedModelId} providerType={currentProviderType} {disabled} />
+  </div>
+
   <div class="input-group">
-    <textarea
-      bind:value={text}
-      onkeydown={handleKeydown}
-      {disabled}
-      placeholder="What would you like to know?"
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      bind:this={editorEl}
+      contenteditable={!disabled}
       class="input-field"
-    ></textarea>
+      class:empty={!hasContent}
+      role="textbox"
+      tabindex="0"
+      oninput={handleInput}
+      onpaste={handlePaste}
+      onkeydown={handleKeydown}
+      data-placeholder="What would you like to know?"
+    ></div>
 
     <div class="input-actions">
-      <div class="tool-row" role="group" aria-label="Prompt tools">
-        <button class="tool-button" type="button" disabled={disabled} title="Attach">
-          +
+      {#if disabled}
+        <button
+          class="send-button stop"
+          type="button"
+          onclick={() => onStop?.()}
+          aria-label="Stop"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="4" y="4" width="16" height="16" rx="2" />
+          </svg>
         </button>
-        <button class="tool-button" type="button" disabled={disabled} title="Voice input">
-          &#8961;
-        </button>
-        <button class="tool-button wide" type="button" disabled={disabled} title="Search">
-          Search
-        </button>
-      </div>
-
-      <div class="actions-row">
-        {#if modelGroups.length > 0}
-          <ModelSelector {modelGroups} bind:selected={selectedModel} />
-        {:else}
-          <span class="model-hint">No model</span>
-        {/if}
-
+      {:else}
         <button
           class="send-button"
           type="button"
           onclick={submit}
-          disabled={disabled || !text.trim()}
-          aria-label="Submit"
+          disabled={!hasContent}
+          aria-label="Send"
         >
-          &#8629;
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="19" x2="12" y2="5"/>
+            <polyline points="5 12 12 5 19 12"/>
+          </svg>
         </button>
-      </div>
+      {/if}
     </div>
 
     {#if disabledReason}
@@ -153,113 +245,85 @@
     cursor: not-allowed;
   }
 
-  /* InputGroup structure */
+  .model-row {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding-bottom: 0.5rem;
+  }
+
   .input-group {
-    border: 1px solid var(--input);
+    border: 1px solid var(--border);
     border-radius: 0.9rem;
-    background: var(--input);
-    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    background: var(--secondary);
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.03);
     overflow: hidden;
     transition: all 0.15s ease;
   }
 
-  .input-group:has(textarea:focus-visible) {
+  .input-group:has(.input-field:focus) {
     border-color: var(--ring);
-    outline: 3px solid rgba(var(--ring-rgb), 0.15);
-    outline-offset: 0;
   }
 
   .input-field {
     width: 100%;
-    border: none;
-    resize: none;
-    background: transparent;
-    color: var(--foreground);
-    font-size: 0.9rem;
-    line-height: 1.4;
-    field-sizing: content;
     min-height: 4rem;
     max-height: 12rem;
+    overflow-y: auto;
     padding: 0.85rem 0.9rem 0.45rem;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    color: var(--foreground);
     outline: none;
     box-sizing: border-box;
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
-  .input-field::placeholder {
+  .input-field.empty::before {
+    content: attr(data-placeholder);
     color: var(--muted-foreground);
+    pointer-events: none;
+  }
+
+  .input-field :global(.paste-ref) {
+    color: oklch(0.5 0.18 250);
   }
 
   .input-actions {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
+    justify-content: flex-end;
     padding: 0 0.5rem 0.55rem 0.55rem;
-  }
-
-  .tool-row,
-  .actions-row {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-  }
-
-  .tool-button {
-    border: none;
-    background: transparent;
-    color: var(--muted-foreground);
-    min-width: 1.8rem;
-    height: 1.8rem;
-    border-radius: 0.45rem;
-    cursor: pointer;
-    font-size: 0.85rem;
-    padding: 0 0.3rem;
-  }
-
-  .tool-button.wide {
-    padding: 0 0.5rem;
-    font-size: 0.8rem;
-  }
-
-  .tool-button:hover:enabled {
-    background: var(--muted);
-    color: var(--foreground);
-  }
-
-  .tool-button:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-
-  .model-hint {
-    color: var(--muted-foreground);
-    font-size: 0.78rem;
-    padding: 0 0.4rem;
   }
 
   .send-button {
     border: none;
     width: 2rem;
     height: 2rem;
-    border-radius: 26px;
+    border-radius: 50%;
     background: var(--primary);
     color: var(--primary-foreground);
     cursor: pointer;
-    font-size: 1rem;
-    line-height: 1;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    transition: background-color 0.15s ease;
+    transition: opacity 0.15s ease;
+    flex-shrink: 0;
   }
 
   .send-button:hover:enabled {
-    background: #27272a;
+    opacity: 0.85;
   }
 
   .send-button:disabled {
     cursor: not-allowed;
-    opacity: 0.45;
+    opacity: 0.35;
+  }
+
+  .send-button.stop {
+    background: var(--muted);
+    color: var(--foreground);
   }
 
   .input-hint {
@@ -278,15 +342,6 @@
     .suggestion-chip {
       font-size: 0.75rem;
       padding: 0.38rem 0.7rem;
-    }
-
-    .input-actions {
-      flex-wrap: wrap;
-      row-gap: 0.45rem;
-    }
-
-    .actions-row {
-      margin-left: auto;
     }
   }
 </style>

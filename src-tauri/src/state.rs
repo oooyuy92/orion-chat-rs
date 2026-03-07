@@ -17,6 +17,8 @@ pub struct AppState {
     pub providers: Mutex<HashMap<String, Arc<dyn Provider>>>,
     pub cancel_sender: watch::Sender<bool>,
     pub cancel_receiver: watch::Receiver<bool>,
+    /// "system" | "none"
+    pub proxy_mode: Mutex<String>,
 }
 
 impl AppState {
@@ -28,6 +30,7 @@ impl AppState {
             providers: Mutex::new(HashMap::new()),
             cancel_sender,
             cancel_receiver,
+            proxy_mode: Mutex::new("system".to_string()),
         })
     }
 
@@ -59,7 +62,10 @@ impl AppState {
             ProviderType::Gemini => {
                 let key = api_key
                     .ok_or_else(|| AppError::Provider("API key required for Gemini".into()))?;
-                Arc::new(GeminiProvider::new(key.to_string()))
+                Arc::new(GeminiProvider::new(
+                    key.to_string(),
+                    api_base.map(|s| s.to_string()),
+                ))
             }
             ProviderType::Ollama => Arc::new(OllamaProvider::new(
                 api_base.map(|s| s.to_string()),

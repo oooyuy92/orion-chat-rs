@@ -10,21 +10,27 @@ use crate::models::*;
 
 use super::{Provider, StreamResult};
 
+const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com";
+
 pub struct GeminiProvider {
     client: Client,
     api_key: String,
+    base_url: String,
 }
 
 impl GeminiProvider {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String, base_url: Option<String>) -> Self {
+        let base = base_url
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_BASE.to_string());
         Self {
             client: Client::new(),
             api_key,
+            base_url: base.trim_end_matches('/').to_string(),
         }
     }
 
     fn build_body(&self, request: &ChatRequest) -> Value {
-        // Extract system instruction
         let system_text: Option<String> = request
             .messages
             .iter()
@@ -32,7 +38,6 @@ impl GeminiProvider {
             .map(|m| m.content.clone())
             .reduce(|a, b| format!("{}\n{}", a, b));
 
-        // Build contents array (no system messages, assistant -> "model")
         let contents: Vec<Value> = request
             .messages
             .iter()
@@ -58,7 +63,6 @@ impl GeminiProvider {
             );
         }
 
-        // generationConfig
         let mut gen_config = json!({});
         let gc = gen_config.as_object_mut().unwrap();
 
@@ -72,30 +76,26 @@ impl GeminiProvider {
             gc.insert("maxOutputTokens".into(), json!(max_tokens));
         }
 
-        // Gemini-specific params
         if let ProviderParams::Gemini {
             thinking_budget,
             thinking_level,
         } = &request.provider_params
         {
-            if thinking_budget.is_some() || thinking_level.is_some() {
-                let mut thinking_config = json!({});
-                let tc = thinking_config.as_object_mut().unwrap();
-
-                if let Some(budget) = thinking_budget {
-                    tc.insert("thinkingBudget".into(), json!(budget));
-                }
-                if let Some(level) = thinking_level {
-                    let level_str = match level {
-                        GeminiThinkingLevel::Low => "LOW",
-                        GeminiThinkingLevel::Medium => "MEDIUM",
-                        GeminiThinkingLevel::High => "HIGH",
-                    };
-                    tc.insert("thinkingLevel".into(), json!(level_str));
-                }
-
-                gc.insert("thinkingConfig".into(), thinking_config);
+            // Always request thought summaries so we can display CoT reasoning
+            let mut thinking_config = json!({ "includeThoughts": true });
+            let tc = thinking_config.as_object_mut().unwrap();
+            if let Some(budget) = thinking_budget {
+                tc.insert("thinkingBudget".into(), json!(budget));
             }
+            if let Some(level) = thinking_level {
+                let level_str = match level {
+                    GeminiThinkingLevel::Low => "LOW",
+                    GeminiThinkingLevel::Medium => "MEDIUM",
+                    GeminiThinkingLevel::High => "HIGH",
+                };
+                tc.insert("thinkingLevel".into(), json!(level_str));
+            }
+            gc.insert("thinkingConfig".into(), thinking_config);
         }
 
         if !gc.is_empty() {
@@ -111,7 +111,17 @@ impl GeminiProvider {
         channel: &Channel<ChatEvent>,
         acc: &mut StreamResult,
     ) -> AppResult<()> {
-        let json: Value = serde_json::from_str(data)?;
+        // Skip non-JSON lines (e.g. empty, "[DONE]")
+        let json: Value = match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
+
+        // Check for API-level error embedded in the SSE stream
+        if let Some(err) = json.get("error") {
+            let msg = err["message"].as_str().unwrap_or("Unknown Gemini error");
+            return Err(AppError::Provider(msg.to_string()));
+        }
 
         if let Some(candidates) = json["candidates"].as_array() {
             for candidate in candidates {
@@ -141,7 +151,10 @@ impl GeminiProvider {
 
         if let Some(usage) = json.get("usageMetadata") {
             let prompt = usage["promptTokenCount"].as_u64().unwrap_or(0) as u32;
-            let completion = usage["candidatesTokenCount"].as_u64().unwrap_or(0) as u32;
+            let completion = usage["candidatesTokenCount"]
+                .as_u64()
+                .or_else(|| usage["totalTokenCount"].as_u64())
+                .unwrap_or(0) as u32;
             if prompt > 0 || completion > 0 {
                 acc.prompt_tokens = prompt;
                 acc.completion_tokens = completion;
@@ -165,8 +178,8 @@ impl Provider for GeminiProvider {
         mut cancel: watch::Receiver<bool>,
     ) -> AppResult<StreamResult> {
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-            request.model, self.api_key
+            "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+            self.base_url, request.model, self.api_key
         );
         let body = self.build_body(&request);
 
@@ -182,7 +195,7 @@ impl Provider for GeminiProvider {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             return Err(AppError::Provider(format!(
-                "API returned {}: {}",
+                "Gemini API error {}: {}",
                 status, text
             )));
         }
@@ -196,7 +209,9 @@ impl Provider for GeminiProvider {
                 maybe_chunk = stream.next() => {
                     match maybe_chunk {
                         Some(Ok(chunk)) => {
-                            buf.push_str(&String::from_utf8_lossy(&chunk));
+                            // Strip \r to normalize CRLF → LF (Gemini sends \r\n line endings)
+                            let text = String::from_utf8_lossy(&chunk).replace('\r', "");
+                            buf.push_str(&text);
 
                             while let Some(pos) = buf.find("\n\n") {
                                 let event_block = buf[..pos].to_string();
@@ -210,15 +225,12 @@ impl Provider for GeminiProvider {
                                 }
                             }
                         }
-                        Some(Err(e)) => return Err(AppError::Http(e)),
+                        Some(Err(e)) => return Err(AppError::from(e)),
                         None => break,
                     }
                 }
                 _ = cancel.changed() => {
                     if *cancel.borrow() {
-                        let _ = channel.send(ChatEvent::Error {
-                            message: "Cancelled".into(),
-                        });
                         return Err(AppError::Cancelled);
                     }
                 }
@@ -230,8 +242,8 @@ impl Provider for GeminiProvider {
 
     async fn list_models(&self) -> AppResult<Vec<ModelInfo>> {
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models?key={}",
-            self.api_key
+            "{}/v1beta/models?key={}&pageSize=200",
+            self.base_url, self.api_key
         );
 
         let response = self.client.get(&url).send().await?;
@@ -240,7 +252,7 @@ impl Provider for GeminiProvider {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             return Err(AppError::Provider(format!(
-                "API returned {}: {}",
+                "Gemini API error {}: {}",
                 status, text
             )));
         }
@@ -252,17 +264,17 @@ impl Provider for GeminiProvider {
             .iter()
             .filter_map(|m| {
                 let name = m["name"].as_str()?;
-                // Strip "models/" prefix
                 let id = name.strip_prefix("models/").unwrap_or(name);
-                // Only include gemini models
-                if !id.contains("gemini") {
+                // Only include generative models (skip embedding/aqa models)
+                let supported: Vec<&str> = m["supportedGenerationMethods"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                if !supported.contains(&"generateContent") {
                     return None;
                 }
                 Some(ModelInfo {
-                    name: m["displayName"]
-                        .as_str()
-                        .unwrap_or(id)
-                        .to_string(),
+                    name: m["displayName"].as_str().unwrap_or(id).to_string(),
                     id: id.to_string(),
                     provider_id: String::new(),
                     context_length: m["inputTokenLimit"].as_u64().map(|v| v as u32),

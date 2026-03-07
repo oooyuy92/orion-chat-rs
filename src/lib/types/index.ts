@@ -12,6 +12,9 @@ export interface Message {
   status: MessageStatus;
   tokenCount: number | null;
   createdAt: string;
+  versionGroupId: string | null;
+  versionNumber: number;
+  totalVersions: number;
 }
 
 export interface Conversation {
@@ -40,7 +43,65 @@ export interface ModelInfo {
 export interface ModelGroup {
   providerId: string;
   providerName: string;
+  providerType: ProviderType;
   models: ModelInfo[];
+}
+
+// -- Model parameter types (mirrors Rust serde structs) --
+
+export interface CommonParams {
+  temperature?: number | null;
+  topP?: number | null;
+  maxTokens?: number | null;
+}
+
+export type AnthropicThinking =
+  | { type: 'adaptive' }
+  | { type: 'enabled'; budgetTokens: number }
+  | { type: 'disabled' };
+
+export type AnthropicEffort = 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'low' | 'medium' | 'high';
+export type GeminiThinkingLevel = 'low' | 'medium' | 'high';
+
+export type ProviderParams =
+  | {
+      provider_type: 'openaiCompat';
+      frequencyPenalty?: number | null;
+      presencePenalty?: number | null;
+      reasoningEffort?: ReasoningEffort | null;
+      seed?: number | null;
+      maxCompletionTokens?: number | null;
+    }
+  | {
+      provider_type: 'anthropic';
+      topK?: number | null;
+      thinking?: AnthropicThinking | null;
+      effort?: AnthropicEffort | null;
+    }
+  | {
+      provider_type: 'gemini';
+      thinkingBudget?: number | null;
+      thinkingLevel?: GeminiThinkingLevel | null;
+    }
+  | {
+      provider_type: 'ollama';
+      think?: boolean | null;
+      numCtx?: number | null;
+      repeatPenalty?: number | null;
+      minP?: number | null;
+      keepAlive?: string | null;
+    };
+
+export interface ModelParams {
+  common: CommonParams;
+  providerParams: ProviderParams;
+}
+
+export interface VersionInfo {
+  versionNumber: number;
+  modelId: string | null;
+  id: string;
 }
 
 export interface ProviderConfig {

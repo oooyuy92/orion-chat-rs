@@ -82,6 +82,17 @@ pub fn update_title(conn: &Connection, id: &str, title: &str) -> AppResult<()> {
     Ok(())
 }
 
+pub fn update_pin(conn: &Connection, id: &str, is_pinned: bool) -> AppResult<()> {
+    let changed = conn.execute(
+        "UPDATE conversations SET is_pinned = ?1 WHERE id = ?2",
+        rusqlite::params![is_pinned as i32, id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::NotFound(format!("Conversation {id}")));
+    }
+    Ok(())
+}
+
 pub fn touch(conn: &Connection, id: &str) -> AppResult<()> {
     conn.execute(
         "UPDATE conversations SET updated_at = datetime('now') WHERE id = ?1",

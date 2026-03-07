@@ -188,7 +188,8 @@ impl Provider for OpenAICompatProvider {
                 maybe_chunk = stream.next() => {
                     match maybe_chunk {
                         Some(Ok(chunk)) => {
-                            buf.push_str(&String::from_utf8_lossy(&chunk));
+                            let text = String::from_utf8_lossy(&chunk).replace('\r', "");
+                            buf.push_str(&text);
 
                             while let Some(pos) = buf.find("\n\n") {
                                 let event_block = buf[..pos].to_string();
@@ -205,7 +206,7 @@ impl Provider for OpenAICompatProvider {
                                 }
                             }
                         }
-                        Some(Err(e)) => return Err(AppError::Http(e)),
+                        Some(Err(e)) => return Err(AppError::from(e)),
                         None => break,
                     }
                 }
