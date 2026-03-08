@@ -9,7 +9,7 @@ on:
       tag:
         description: 'Tag to build and publish'
         required: true
-        default: 'v0.1.0'
+        default: 'v0.2.0'
 
 permissions:
   contents: write
@@ -75,16 +75,17 @@ jobs:
         uses: tauri-apps/tauri-action@v0.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: ${{ env.RELEASE_TAG }}
           releaseBody: |
-            首个公开版本 / First public release of Orion Chat.
+            Orion Chat release with desktop installers and updater metadata.
 
             包含桌面端构建产物。 / Desktop build artifacts are attached to this release.
           releaseDraft: false
           prerelease: false
           includeDebug: false
-          includeUpdaterJson: false
+          includeUpdaterJson: true
           tauriScript: pnpm tauri
           args: ${{ matrix.args }}

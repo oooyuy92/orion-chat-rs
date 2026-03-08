@@ -9,6 +9,7 @@
   import { load as loadStore } from '@tauri-apps/plugin-store';
   import { getVersion } from '@tauri-apps/api/app';
   import { i18n, type Language } from '$lib/stores/i18n.svelte';
+  import { createDefaultAutoUpdaterController } from '$lib/utils/autoUpdater.js';
 
   type NavItemId =
     | 'modelService'
@@ -172,17 +173,87 @@
   let backingUp = $state(false);
 
   // ── 关于我们 ──
+  const releaseUrl = 'https://github.com/oooyuy92/orion-chat-rs/releases/latest';
   let appVersion = $state('');
   let autoUpdate = $state(true);
   let checkingUpdate = $state(false);
-  let updateStatus = $state('');
+  let updatePhase = $state('idle');
+  let updateVersion = $state('');
+  let updateError = $state('');
+  let updateDownloadedBytes = $state(0);
+  let updateTotalBytes = $state<number | null>(null);
+  let updaterController = $state<any>(null);
+
+  function applyUpdateSnapshot(snapshot: any) {
+    updatePhase = snapshot.phase ?? 'idle';
+    updateVersion = snapshot.version ?? '';
+    updateError = snapshot.error ?? '';
+    updateDownloadedBytes = snapshot.downloadedBytes ?? 0;
+    updateTotalBytes = snapshot.totalBytes ?? null;
+  }
+
+  async function ensureUpdaterController() {
+    if (!updaterController) {
+      updaterController = await createDefaultAutoUpdaterController({ releaseUrl });
+    }
+    return updaterController;
+  }
 
   async function handleCheckUpdate() {
     checkingUpdate = true;
-    updateStatus = '';
-    await new Promise(r => setTimeout(r, 1200));
-    checkingUpdate = false;
-    updateStatus = 'latest';
+    updateError = '';
+    try {
+      const controller = await ensureUpdaterController();
+      const result = await controller.checkForUpdates({
+        autoDownload: autoUpdate,
+        onProgress: (_event: any, snapshot: any) => applyUpdateSnapshot(snapshot),
+      });
+      applyUpdateSnapshot(result);
+    } catch (e) {
+      updatePhase = 'error';
+      updateError = String(e);
+    } finally {
+      checkingUpdate = false;
+    }
+  }
+
+  async function handleDownloadUpdate() {
+    try {
+      const controller = await ensureUpdaterController();
+      const result = await controller.downloadPendingUpdate({
+        onProgress: (_event: any, snapshot: any) => applyUpdateSnapshot(snapshot),
+      });
+      applyUpdateSnapshot(result);
+    } catch (e) {
+      updatePhase = 'error';
+      updateError = String(e);
+    }
+  }
+
+  async function handleInstallUpdate() {
+    const confirmed = window.confirm(language === 'zh' ? '更新已下载，是否立即重启并安装？' : 'The update has been downloaded. Restart now to install it?');
+    if (!confirmed) return;
+
+    try {
+      const controller = await ensureUpdaterController();
+      const result = await controller.installAndRestart();
+      applyUpdateSnapshot(result);
+    } catch (e) {
+      updatePhase = 'error';
+      updateError = String(e);
+    }
+  }
+
+  function openLatestRelease() {
+    window.open(releaseUrl, '_blank', 'noopener,noreferrer');
+  }
+
+  function formatUpdateBytes(bytes: number | null | undefined) {
+    if (bytes == null || Number.isNaN(bytes)) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
   }
 
   async function handlePickBackupDir() {
@@ -311,6 +382,29 @@
     void autoUpdate; void autoRename; void autoRenameModelId;
     void autoCompress; void autoCompressModelId; void autoCompressThreshold;
     saveSettings();
+  });
+
+  const updateStatusText = $derived.by(() => {
+    switch (updatePhase) {
+      case 'up-to-date':
+        return t.upToDate;
+      case 'available':
+        return updateVersion ? (t.updateAvailable?.(updateVersion) ?? '') : '';
+      case 'downloading': {
+        const progress = updateTotalBytes && updateTotalBytes > 0
+          ? `${formatUpdateBytes(updateDownloadedBytes)} / ${formatUpdateBytes(updateTotalBytes)}`
+          : formatUpdateBytes(updateDownloadedBytes);
+        return updateVersion ? (t.downloadingUpdate?.(updateVersion, progress) ?? '') : '';
+      }
+      case 'downloaded':
+        return updateVersion ? (t.downloadedUpdate?.(updateVersion) ?? '') : '';
+      case 'installing':
+        return t.installingUpdate;
+      case 'error':
+        return updateError ? (t.updateFailed?.(updateError) ?? updateError) : (t.updateFailed?.('Unknown error') ?? 'Unknown error');
+      default:
+        return '';
+    }
   });
 
   onMount(() => {
@@ -509,6 +603,14 @@
       checkUpdate: '检查更新',
       checkingUpdate: '检查中...',
       upToDate: '已是最新版本',
+      updateAvailable: (version: string) => `发现新版本：${version}`,
+      downloadUpdate: '下载更新',
+      downloadingUpdate: (version: string, progress: string) => `正在下载 ${version}${progress ? `（${progress}）` : ''}` ,
+      downloadedUpdate: (version: string) => `更新 ${version} 已下载，重启后安装。`,
+      restartToInstall: '重启安装',
+      installingUpdate: '正在安装更新...',
+      updateFailed: (message: string) => `更新失败：${message}`,
+      openReleasePage: '打开发布页',
     };
   });
 
@@ -1411,11 +1513,25 @@
 
       <div class="detail-section">
         <div class="about-update-row">
-          <Button variant="outline" size="sm" onclick={handleCheckUpdate} disabled={checkingUpdate}>
+          <Button variant="outline" size="sm" onclick={handleCheckUpdate} disabled={checkingUpdate || updatePhase === 'downloading' || updatePhase === 'installing'}>
             {checkingUpdate ? t.checkingUpdate : t.checkUpdate}
           </Button>
-          {#if updateStatus === 'latest'}
-            <span class="update-status">{t.upToDate}</span>
+          {#if updatePhase === 'available'}
+            <Button variant="outline" size="sm" onclick={handleDownloadUpdate}>
+              {t.downloadUpdate}
+            </Button>
+          {:else if updatePhase === 'downloaded'}
+            <Button size="sm" onclick={handleInstallUpdate}>
+              {t.restartToInstall}
+            </Button>
+          {:else if updatePhase === 'error'}
+            <Button variant="outline" size="sm" onclick={openLatestRelease}>
+              {t.openReleasePage}
+            </Button>
+          {/if}
+
+          {#if updateStatusText}
+            <span class="update-status" class:is-error={updatePhase === 'error'}>{updateStatusText}</span>
           {/if}
         </div>
       </div>
@@ -2139,6 +2255,22 @@
     transition: background 0.15s, border-color 0.15s;
     white-space: nowrap;
     flex-shrink: 0;
+  }
+
+  .about-update-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .update-status {
+    font-size: 0.8rem;
+    color: var(--muted-foreground);
+  }
+
+  .update-status.is-error {
+    color: var(--destructive);
   }
 
   .github-badge:hover {
