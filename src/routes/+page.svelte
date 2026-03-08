@@ -11,6 +11,11 @@
   import type { Assistant, Conversation, Message, ModelGroup, ProviderType } from '$lib/types';
   import { i18n } from '$lib/stores/i18n.svelte';
 
+  type ConversationSelection = {
+    conversationId: string;
+    messageId?: string | null;
+  };
+
   let activeConversationId = $state('');
   let messages = $state<Message[]>([]);
   const pageSize = 100;
@@ -22,6 +27,7 @@
   let modelGroups = $state<ModelGroup[]>([]);
   let assistants = $state<Assistant[]>([]);
   let conversations = $state<Conversation[]>([]);
+  let pendingFocusMessageId = $state<string | null>(null);
 
   const currentConversation = $derived(
     conversations.find((conversation) => conversation.id === activeConversationId) ?? null,
@@ -187,12 +193,49 @@
     window.removeEventListener('keydown', handleUndoKeydown);
   });
 
-  function handleConversationSelect(id: string) {
-    invalidateRestore();
-    activeConversationId = id;
-    void refreshConversationState(id);
-    void loadLatestMessages(id);
+async function loadMessagesUntilFocused(conversationId: string, messageId: string) {
+  if (messages.some((message) => message.id === messageId)) {
+    return;
   }
+
+  isLoadingMoreMessages = true;
+  try {
+    while (
+      activeConversationId === conversationId &&
+      !messages.some((message) => message.id === messageId) &&
+      hasMoreMessages
+    ) {
+      const beforeMessageId = messages[0]?.id ?? null;
+      if (!beforeMessageId) break;
+      const page = await api.getMessages(conversationId, {
+        limit: pageSize,
+        beforeMessageId,
+      });
+      messages = [...page.messages, ...messages];
+      hasMoreMessages = page.hasMore;
+      if (page.messages.length === 0) {
+        break;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to focus searched message:', e);
+  } finally {
+    isLoadingMoreMessages = false;
+  }
+}
+
+function handleConversationSelect(selection: ConversationSelection) {
+  invalidateRestore();
+  activeConversationId = selection.conversationId;
+  pendingFocusMessageId = selection.messageId ?? null;
+  void refreshConversationState(selection.conversationId);
+  void (async () => {
+    await loadLatestMessages(selection.conversationId);
+    if (selection.messageId) {
+      await loadMessagesUntilFocused(selection.conversationId, selection.messageId);
+    }
+  })();
+}
 
   async function handleAssistantSelect(assistantId: string | null) {
     if (!activeConversationId || assistantSelectionLocked) return;
@@ -843,6 +886,7 @@
         {hasMoreMessages}
         {isLoadingMoreMessages}
         canLoadOlderMessages={!isStreaming && !isCompressing}
+        focusedMessageId={pendingFocusMessageId}
         bind:selectedModelId={currentModelId}
         disabled={isStreaming || isCompressing}
         onAssistantSelect={handleAssistantSelect}

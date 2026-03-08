@@ -11,6 +11,7 @@ import type {
   VersionInfo,
   CommonParams,
   ProviderParams,
+  SearchSidebarResult,
 } from '$lib/types';
 
 export type ChatEventHandler = (event: ChatEvent) => void;
@@ -163,10 +164,13 @@ export const api = {
     return invoke('delete_assistant', { id });
   },
 
-  // Search
-  searchMessages(query: string): Promise<Message[]> {
-    return invoke('search_messages', { query });
-  },
+// Search
+searchMessages(query: string): Promise<Message[]> {
+  return invoke('search_messages', { query });
+},
+searchSidebarResults(query: string): Promise<SearchSidebarResult[]> {
+  return invoke('search_sidebar_results', { query });
+},
 
   // Export
   exportMarkdown(conversationId: string): Promise<string> {

@@ -1,13 +1,44 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use rusqlite::Connection;
 use tauri::State;
-
-use std::collections::HashSet;
 
 use crate::db;
 use crate::error::AppResult;
-use crate::models::{Message, Role};
+use crate::models::{Message, Role, SearchSidebarResult};
 use crate::state::AppState;
+
+fn search_sidebar_results_with_conn(
+    conn: &Connection,
+    query: &str,
+) -> AppResult<Vec<SearchSidebarResult>> {
+    let mut seen = HashSet::new();
+    let mut results = Vec::new();
+
+    for result in db::messages::search_sidebar_results(conn, query)? {
+        let key = (
+            result.conversation_id.clone(),
+            result.message_id.clone().unwrap_or_default(),
+        );
+        if seen.insert(key) {
+            results.push(result);
+        }
+    }
+
+    for result in db::paste_blobs::search_sidebar_results(conn, query)? {
+        let key = (
+            result.conversation_id.clone(),
+            result.message_id.clone().unwrap_or_default(),
+        );
+        if seen.insert(key) {
+            results.push(result);
+        }
+    }
+
+    results.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+    Ok(results)
+}
 
 #[tauri::command]
 pub async fn search_messages(
@@ -57,4 +88,114 @@ pub async fn search_messages(
         }
         Ok(results)
     })
+}
+
+#[tauri::command]
+pub async fn search_sidebar_results(
+    state: State<'_, Arc<AppState>>,
+    query: String,
+) -> AppResult<Vec<SearchSidebarResult>> {
+    state
+        .db
+        .with_conn(|conn| search_sidebar_results_with_conn(conn, &query))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::db::conversations;
+    use crate::db::messages;
+    use crate::db::paste_blobs;
+    use crate::models::{Conversation, MessageStatus};
+
+    fn make_conversation(id: &str) -> Conversation {
+        Conversation {
+            id: id.into(),
+            title: "Search Test".into(),
+            assistant_id: None,
+            model_id: None,
+            is_pinned: false,
+            sort_order: 0,
+            created_at: "2025-01-01T00:00:00".into(),
+            updated_at: "2025-01-01T00:00:00".into(),
+        }
+    }
+
+    fn make_message(id: &str, content: &str, created_at: &str) -> Message {
+        Message {
+            id: id.into(),
+            conversation_id: "conv-1".into(),
+            role: Role::User,
+            content: content.into(),
+            reasoning: None,
+            model_id: None,
+            status: MessageStatus::Done,
+            token_count: None,
+            created_at: created_at.into(),
+            version_group_id: None,
+            version_number: 1,
+            total_versions: 1,
+        }
+    }
+
+    #[test]
+    fn sidebar_search_returns_message_snippet_for_message_match() {
+        let db = Database::new(":memory:").unwrap();
+
+        db.with_conn(|conn| {
+            conversations::create(conn, &make_conversation("conv-1"))?;
+            messages::create(
+                conn,
+                &make_message(
+                    "msg-1",
+                    "hello rust programming language in chat history",
+                    "2025-01-01T00:00:00",
+                ),
+            )?;
+
+            let results = search_sidebar_results_with_conn(conn, "rust")?;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].conversation_id, "conv-1");
+            assert_eq!(results[0].message_id.as_deref(), Some("msg-1"));
+            assert!(results[0].snippet.contains("rust"));
+            Ok::<(), crate::error::AppError>(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn sidebar_search_returns_paste_snippet_for_paste_match() {
+        let db = Database::new(":memory:").unwrap();
+
+        db.with_conn(|conn| {
+            conversations::create(conn, &make_conversation("conv-1"))?;
+            messages::create(
+                conn,
+                &make_message(
+                    "msg-2",
+                    "see attached long paste placeholder",
+                    "2025-01-01T00:00:01",
+                ),
+            )?;
+            paste_blobs::create(
+                conn,
+                "paste-1",
+                "conv-1",
+                "msg-2",
+                24,
+                "pastes/paste-1.txt",
+                "alpha beta gamma delta epsilon",
+                "2025-01-01T00:00:01",
+            )?;
+
+            let results = search_sidebar_results_with_conn(conn, "gamma")?;
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].message_id.as_deref(), Some("msg-2"));
+            assert!(results[0].snippet.contains("gamma"));
+            assert!(!results[0].snippet.contains("placeholder"));
+            Ok::<(), crate::error::AppError>(())
+        })
+        .unwrap();
+    }
 }

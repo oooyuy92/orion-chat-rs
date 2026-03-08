@@ -30,6 +30,7 @@
     hasMoreMessages = false,
     isLoadingMoreMessages = false,
     canLoadOlderMessages = true,
+    focusedMessageId = null,
     onLoadOlder,
   }: {
     conversationId?: string;
@@ -39,6 +40,7 @@
     hasMoreMessages?: boolean;
     isLoadingMoreMessages?: boolean;
     canLoadOlderMessages?: boolean;
+    focusedMessageId?: string | null;
     onLoadOlder?: () => void | Promise<void>;
   } = $props();
 
@@ -51,6 +53,9 @@
   let previousLastMessageId = $state<string | null>(null);
   let pendingPrependAnchor = $state<{ scrollHeight: number; scrollTop: number } | null>(null);
   let heightCache = $state(new Map<string, number>());
+  let highlightedMessageId = $state('');
+  let lastFocusedMessageId = $state('');
+  let highlightTimer = $state<ReturnType<typeof setTimeout> | null>(null);
 
   const messageIds = $derived(messages.map((message) => message.id));
   const virtualWindow = $derived(
@@ -76,11 +81,51 @@
     });
   }
 
-  function scrollToBottom() {
-    if (!container) return;
-    container.scrollTop = container.scrollHeight;
-    syncScrollMetrics();
+function scrollToBottom() {
+  if (!container) return;
+  container.scrollTop = container.scrollHeight;
+  syncScrollMetrics();
+}
+
+function estimateOffsetForIndex(index: number) {
+  return messageIds
+    .slice(0, index)
+    .reduce((sum, messageId) => sum + (heightCache.get(messageId) ?? ESTIMATED_ROW_HEIGHT), 0);
+}
+
+function highlightFocusedMessage(messageId: string) {
+  highlightedMessageId = messageId;
+  if (highlightTimer) {
+    clearTimeout(highlightTimer);
   }
+  highlightTimer = setTimeout(() => {
+    if (highlightedMessageId === messageId) {
+      highlightedMessageId = '';
+    }
+  }, 1800);
+}
+
+function scrollToFocusedMessage(messageId: string) {
+  if (!container) return;
+  const index = messages.findIndex((message) => message.id === messageId);
+  if (index === -1) return;
+
+  const estimatedHeight = heightCache.get(messageId) ?? ESTIMATED_ROW_HEIGHT;
+  const estimatedTop = estimateOffsetForIndex(index);
+  container.scrollTop = Math.max(
+    0,
+    estimatedTop - Math.max((container.clientHeight - estimatedHeight) / 2, 0),
+  );
+  syncScrollMetrics();
+
+  void tick().then(() => {
+    if (!container) return;
+    const row = container.querySelector(`[data-message-id="${messageId}"]`) as HTMLDivElement | null;
+    row?.scrollIntoView({ block: 'center' });
+    syncScrollMetrics();
+    highlightFocusedMessage(messageId);
+  });
+}
 
   function handleScroll() {
     if (!container) return;
@@ -196,8 +241,21 @@
     }
   });
 
-  $effect(() => {
-    const currentCount = messages.length;
+$effect(() => {
+  if (!focusedMessageId || !container || focusedMessageId === lastFocusedMessageId) {
+    return;
+  }
+
+  if (!messages.some((message) => message.id === focusedMessageId)) {
+    return;
+  }
+
+  lastFocusedMessageId = focusedMessageId;
+  scrollToFocusedMessage(focusedMessageId);
+});
+
+$effect(() => {
+  const currentCount = messages.length;
     const currentLastMessageId = messages.at(-1)?.id ?? null;
 
     if (!container) {
@@ -258,7 +316,7 @@
       {/if}
 
       {#each visibleMessages as message (message.id)}
-        <div class="message-row" use:measureRow={message.id}>
+        <div class="message-row" class:message-row-highlighted={highlightedMessageId === message.id} data-message-id={message.id} use:measureRow={message.id}>
           <MessageBubble {message} {onAction} {disabled} />
         </div>
       {/each}
@@ -312,6 +370,13 @@
   .message-row {
     box-sizing: border-box;
     padding-bottom: 1.2rem;
+    transition: background-color 180ms ease, box-shadow 180ms ease;
+    border-radius: 0.9rem;
+  }
+
+  .message-row-highlighted {
+    background: hsl(var(--primary) / 0.08);
+    box-shadow: 0 0 0 1px hsl(var(--primary) / 0.18);
   }
 
   .loading-older-state {

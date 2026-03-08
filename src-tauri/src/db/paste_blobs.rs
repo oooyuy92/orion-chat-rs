@@ -1,6 +1,7 @@
 use rusqlite::Connection;
 
 use crate::error::AppResult;
+use crate::models::SearchSidebarResult;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PasteBlob {
@@ -126,6 +127,30 @@ pub fn search_message_ids(conn: &Connection, query: &str) -> AppResult<Vec<Strin
          ORDER BY p.message_id ASC",
     )?;
     let rows = stmt.query_map([query], |row| row.get::<_, String>(0))?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+pub fn search_sidebar_results(conn: &Connection, query: &str) -> AppResult<Vec<SearchSidebarResult>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.conversation_id, p.message_id, snippet(paste_blobs_fts, 2, '', '', ' … ', 12), p.created_at
+         FROM paste_blobs_fts
+         JOIN paste_blobs p ON p.id = paste_blobs_fts.paste_id
+         JOIN messages m ON m.id = p.message_id
+         WHERE paste_blobs_fts MATCH ?1 AND m.deleted_at IS NULL AND m.is_active_version = 1
+         ORDER BY p.created_at DESC, p.rowid DESC",
+    )?;
+    let rows = stmt.query_map([query], |row| {
+        Ok(SearchSidebarResult {
+            conversation_id: row.get(0)?,
+            message_id: Some(row.get(1)?),
+            snippet: row.get::<_, String>(2)?.trim().to_string(),
+            created_at: row.get(3)?,
+        })
+    })?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);

@@ -27,6 +27,14 @@ export interface GetMessagesOptions {
   beforeMessageId?: string | null;
 }
 
+
+export interface SearchSidebarResult {
+  conversationId: string;
+  messageId: string | null;
+  snippet: string;
+  createdAt: string;
+}
+
 export interface Conversation {
   id: string;
   title: string;

@@ -114,6 +114,7 @@ pub fn run() {
             commands::assistant::update_assistant,
             commands::assistant::delete_assistant,
             commands::search::search_messages,
+            commands::search::search_sidebar_results,
             commands::export::export_conversation_markdown,
             commands::export::export_conversation_json,
             commands::settings::get_app_paths,

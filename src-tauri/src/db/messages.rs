@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 use crate::error::AppResult;
-use crate::models::{Message, MessageStatus, Role};
+use crate::models::{Message, MessageStatus, Role, SearchSidebarResult};
 
 fn parse_role(s: &str) -> Role {
     match s {
@@ -465,6 +465,29 @@ pub fn search(conn: &Connection, query: &str) -> AppResult<Vec<Message>> {
          ORDER BY fts.rank",
     )?;
     let rows = stmt.query_map([query], |row| row_to_message_with_total(row))?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+pub fn search_sidebar_results(conn: &Connection, query: &str) -> AppResult<Vec<SearchSidebarResult>> {
+    let mut stmt = conn.prepare(
+        "SELECT m.conversation_id, m.id, snippet(messages_fts, 0, '', '', ' … ', 12), m.created_at
+         FROM messages m
+         JOIN messages_fts ON m.rowid = messages_fts.rowid
+         WHERE messages_fts MATCH ?1 AND m.deleted_at IS NULL AND m.is_active_version = 1
+         ORDER BY bm25(messages_fts), m.created_at DESC",
+    )?;
+    let rows = stmt.query_map([query], |row| {
+        Ok(SearchSidebarResult {
+            conversation_id: row.get(0)?,
+            message_id: Some(row.get(1)?),
+            snippet: row.get::<_, String>(2)?.trim().to_string(),
+            created_at: row.get(3)?,
+        })
+    })?;
     let mut result = Vec::new();
     for row in rows {
         result.push(row?);

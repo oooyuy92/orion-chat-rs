@@ -18,12 +18,12 @@ const releaseWorkflow = readFileSync(
 
 const permissions = defaultCapability.permissions ?? [];
 
-test('rust crate version is aligned to 0.2.1', () => {
-  assert.match(cargoToml, /^version = "0\.2\.1"$/m);
+test('rust crate version is aligned to 0.3.0', () => {
+  assert.match(cargoToml, /^version = "0\.3\.0"$/m);
 });
 
-test('tauri app version is aligned to 0.2.1', () => {
-  assert.equal(tauriConfig.version, '0.2.1');
+test('tauri app version is aligned to 0.3.0', () => {
+  assert.equal(tauriConfig.version, '0.3.0');
 });
 
 test('rust dependencies include updater and process plugins', () => {

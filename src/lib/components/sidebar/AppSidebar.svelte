@@ -3,12 +3,17 @@
   import ConversationList from '$lib/components/sidebar/ConversationList.svelte';
   import UserMenu from '$lib/components/sidebar/UserMenu.svelte';
 
+  export type ConversationSelection = {
+    conversationId: string;
+    messageId?: string | null;
+  };
+
   let {
     activeConversationId = $bindable(''),
     onConversationSelect,
   }: {
     activeConversationId?: string;
-    onConversationSelect: (id: string) => void;
+    onConversationSelect: (selection: ConversationSelection) => void;
   } = $props();
 </script>
 
