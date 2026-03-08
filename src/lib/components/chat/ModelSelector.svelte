@@ -9,6 +9,7 @@
     DropdownMenuTrigger
   } from '$lib/components/ui/dropdown-menu';
   import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
+  import { i18n } from '$lib/stores/i18n.svelte';
 
   let {
     modelGroups,
@@ -41,7 +42,7 @@
         {...props}
         class="model-trigger"
       >
-        <span class="model-name">{selectedModel()?.name || 'Select model'}</span>
+        <span class="model-name">{selectedModel()?.name || i18n.t.selectModel}</span>
         <ChevronDownIcon class="h-3.5 w-3.5 opacity-50" />
       </button>
     {/snippet}

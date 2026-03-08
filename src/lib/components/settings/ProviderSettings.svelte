@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import type { ProviderConfig, ProviderType } from '$lib/types';
   import { api } from '$lib/utils/invoke';
   import { Button } from '$lib/components/ui/button';
@@ -7,26 +7,64 @@
   import { Slider } from '$lib/components/ui/slider';
   import { load as loadStore } from '@tauri-apps/plugin-store';
   import { getVersion } from '@tauri-apps/api/app';
+  import { i18n, type Language } from '$lib/stores/i18n.svelte';
+
+  type NavItemId =
+    | 'modelService'
+    | 'generalSettings'
+    | 'displaySettings'
+    | 'dataSettings'
+    | 'networkSearch'
+    | 'globalMemory'
+    | 'quickPhrases'
+    | 'shortcuts'
+    | 'about';
 
   type SectionGroup = {
     title: string;
-    items: string[];
+    items: NavItemId[];
   };
 
-  const sectionGroups: SectionGroup[] = [
-    { title: '模型服务', items: ['模型服务', '常规设置', '显示设置', '数据设置'] },
-    { title: 'MCP 服务器', items: ['网络搜索', '全局记忆', '快捷短语', '快捷键'] },
-    { title: '其他', items: ['关于我们'] },
-  ];
+  const language = $derived(i18n.language as Language);
 
-  let activeNav = $state('模型服务');
+  function navLabel(item: NavItemId) {
+    const isEn = language === 'en';
+    switch (item) {
+      case 'modelService':
+        return isEn ? 'Model Service' : '模型服务';
+      case 'generalSettings':
+        return isEn ? 'General Settings' : '常规设置';
+      case 'displaySettings':
+        return isEn ? 'Display Settings' : '显示设置';
+      case 'dataSettings':
+        return isEn ? 'Data Settings' : '数据设置';
+      case 'networkSearch':
+        return isEn ? 'Web Search' : '网络搜索';
+      case 'globalMemory':
+        return isEn ? 'Global Memory' : '全局记忆';
+      case 'quickPhrases':
+        return isEn ? 'Quick Phrases' : '快捷短语';
+      case 'shortcuts':
+        return isEn ? 'Shortcuts' : '快捷键';
+      case 'about':
+        return isEn ? 'About' : '关于我们';
+    }
+  }
 
-  const providerTypeOptions: { value: ProviderType; label: string; defaultBase: string }[] = [
-    { value: 'openaiCompat', label: 'OpenAI Compatible', defaultBase: 'https://api.openai.com/v1' },
-    { value: 'anthropic', label: 'Anthropic', defaultBase: 'https://api.anthropic.com' },
-    { value: 'gemini', label: 'Gemini', defaultBase: 'https://generativelanguage.googleapis.com' },
-    { value: 'ollama', label: 'Ollama', defaultBase: 'http://127.0.0.1:11434' },
-  ];
+  const sectionGroups = $derived.by((): SectionGroup[] => [
+    { title: navLabel('modelService'), items: ['modelService', 'generalSettings', 'displaySettings', 'dataSettings'] },
+    { title: language === 'en' ? 'MCP Servers' : 'MCP 服务器', items: ['networkSearch', 'globalMemory', 'quickPhrases', 'shortcuts'] },
+    { title: language === 'en' ? 'Other' : '其他', items: ['about'] },
+  ]);
+
+  let activeNav = $state<NavItemId>('modelService');
+
+  const providerTypeOptions = $derived.by(() => [
+    { value: 'openaiCompat' as const, label: language === 'en' ? 'OpenAI Compatible' : 'OpenAI 兼容', defaultBase: 'https://api.openai.com/v1' },
+    { value: 'anthropic' as const, label: 'Anthropic', defaultBase: 'https://api.anthropic.com' },
+    { value: 'gemini' as const, label: 'Gemini', defaultBase: 'https://generativelanguage.googleapis.com' },
+    { value: 'ollama' as const, label: 'Ollama', defaultBase: 'http://127.0.0.1:11434' },
+  ]);
 
   let providers = $state<ProviderConfig[]>([]);
   let loading = $state(true);
@@ -51,11 +89,11 @@
   let syncingModels = $state<Record<string, boolean>>({});
 
   let editingName = $state(false);
+  let editNameInput = $state<HTMLInputElement | null>(null);
   let contextMenu = $state<{ x: number; y: number; providerId: string } | null>(null);
   let modelSearch = $state('');
 
   // ── 常规设置 ──
-  let language = $state<'zh' | 'en'>('zh');
   let proxyMode = $state<'system' | 'none'>('system');
   let autoLaunch = $state(false);
 
@@ -210,8 +248,8 @@
   // ── Settings persistence with tauri-plugin-store ──
   async function loadSettings() {
     try {
+      await i18n.init();
       const store = await loadStore('settings.json');
-      language = (await store.get<'zh' | 'en'>('language')) ?? 'zh';
       proxyMode = (await store.get<'system' | 'none'>('proxyMode')) ?? 'system';
       autoBackup = (await store.get<typeof autoBackup>('autoBackup')) ?? 'off';
       maxBackups = (await store.get<number>('maxBackups')) ?? 3;
@@ -243,7 +281,6 @@
   async function saveSettings() {
     try {
       const store = await loadStore('settings.json');
-      await store.set('language', language);
       await store.set('proxyMode', proxyMode);
       await store.set('autoBackup', autoBackup);
       await store.set('maxBackups', maxBackups);
@@ -265,7 +302,7 @@
 
   // Auto-save display/general settings whenever they change
   $effect(() => {
-    void language; void proxyMode; void autoBackup; void maxBackups;
+    void proxyMode; void autoBackup; void maxBackups;
     void compactBackup; void backupDir; void selectedColorIndex; void zoomLevel;
     void autoUpdate; void autoRename; void autoRenameModelId;
     void autoCompress; void autoCompressModelId; void autoCompressThreshold;
@@ -273,6 +310,7 @@
   });
 
   onMount(() => {
+    void i18n.init();
     loadProviders();
     loadSettings().then(async () => {
       try {
@@ -596,10 +634,10 @@
       providers = providers.map((provider) =>
         provider.id === providerId ? { ...provider, models } : provider,
       );
-      success = `模型同步成功，共 ${models.length} 个模型。`;
+      success = language === 'zh' ? `模型同步成功，共 ${models.length} 个模型。` : `Model sync succeeded with ${models.length} models.`;
     } catch (e) {
       console.error('Failed to fetch models:', e);
-      error = `模型检测失败：${e}`;
+      error = language === 'zh' ? `模型检测失败：${e}` : `Model check failed: ${e}`;
     } finally {
       syncingModels = { ...syncingModels, [providerId]: false };
     }
@@ -628,7 +666,7 @@
       );
     } catch (e) {
       console.error('Failed to update model visibility:', e);
-      error = `更新模型显示状态失败：${e}`;
+      error = language === 'zh' ? `更新模型显示状态失败：${e}` : `Failed to update model visibility: ${e}`;
     } finally {
       updatingModels = { ...updatingModels, [modelId]: false };
     }
@@ -653,10 +691,12 @@
             }
           : provider,
       );
-      success = enabled ? '已勾选该服务下全部模型。' : '已取消该服务下全部模型。';
+      success = enabled
+        ? (language === 'zh' ? '已勾选该服务下全部模型。' : 'All models under this provider are now selected.')
+        : (language === 'zh' ? '已取消该服务下全部模型。' : 'All models under this provider are now deselected.');
     } catch (e) {
       console.error('Failed to batch update model visibility:', e);
-      error = `批量更新模型显示状态失败：${e}`;
+      error = language === 'zh' ? `批量更新模型显示状态失败：${e}` : `Failed to update model visibility in bulk: ${e}`;
     } finally {
       bulkUpdatingModels = false;
     }
@@ -671,7 +711,7 @@
     const nextBase = draftApiBase.trim();
 
     if (!nextName || !nextBase) {
-      error = '服务名称和 API 地址不能为空。';
+      error = language === 'zh' ? '服务名称和 API 地址不能为空。' : 'Provider name and API address are required.';
       return;
     }
 
@@ -695,7 +735,7 @@
       selectProvider(updated.id);
     } catch (e) {
       console.error('Failed to update provider:', e);
-      error = `保存失败：${e}`;
+      error = language === 'zh' ? `保存失败：${e}` : `Save failed: ${e}`;
     } finally {
       saving = false;
     }
@@ -706,7 +746,7 @@
     const base = newApiBase.trim();
 
     if (!name || !base) {
-      error = '请先填写服务名称和 API 地址。';
+      error = language === 'zh' ? '请先填写服务名称和 API 地址。' : 'Please enter a provider name and API address first.';
       return;
     }
 
@@ -732,10 +772,10 @@
       newApiBase = providerTypeDefaultBase('openaiCompat');
       newApiKey = '';
       newEnabled = true;
-      success = '服务已添加。';
+      success = language === 'zh' ? '服务已添加。' : 'Provider added.';
     } catch (e) {
       console.error('Failed to create provider:', e);
-      error = `添加失败：${e}`;
+      error = language === 'zh' ? `添加失败：${e}` : `Add failed: ${e}`;
     } finally {
       creating = false;
     }
@@ -791,7 +831,7 @@
     const target = providers.find((p) => p.id === contextMenu!.providerId);
     if (!target) return;
 
-    const confirmed = window.confirm(`确认删除服务 "${target.name}" 吗？`);
+    const confirmed = window.confirm(language === 'zh' ? `确认删除服务 "${target.name}" 吗？` : `Delete provider "${target.name}"?`);
     closeContextMenu();
     if (!confirmed) return;
 
@@ -814,10 +854,10 @@
         draftApiKey = '';
       }
 
-      success = '服务已删除。';
+      success = language === 'zh' ? '服务已删除。' : 'Provider deleted.';
     } catch (e) {
       console.error('Failed to delete provider:', e);
-      error = `删除失败：${e}`;
+      error = language === 'zh' ? `删除失败：${e}` : `Delete failed: ${e}`;
     } finally {
       deleting = false;
     }
@@ -838,8 +878,11 @@
     selectProvider(targetId);
   }
 
-  function startEditName() {
+  async function startEditName() {
     editingName = true;
+    await tick();
+    editNameInput?.focus();
+    editNameInput?.select();
   }
 
   function finishEditName() {
@@ -860,13 +903,13 @@
       <section class="nav-group">
         <h3>{group.title}</h3>
         {#each group.items as item}
-          <button class="nav-item" class:is-active={item === activeNav} onclick={() => activeNav = item}>{item}</button>
+          <button class="nav-item" class:is-active={item === activeNav} onclick={() => activeNav = item}>{navLabel(item)}</button>
         {/each}
       </section>
     {/each}
   </aside>
 
-  {#if activeNav === '模型服务'}
+  {#if activeNav === 'modelService'}
     <!-- Provider List -->
     <section class="provider-list-panel">
       <div class="panel-head">
@@ -882,7 +925,8 @@
       {:else}
         {#each filteredProviders as provider, i (provider.id)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
+          <button
+            type="button"
             class="provider-card"
             class:is-active={provider.id === selectedProviderId}
             onclick={() => selectProvider(provider.id)}
@@ -894,10 +938,10 @@
                 <span class="provider-badge">{t.default}</span>
               {/if}
               <span class="provider-state" class:enabled={provider.enabled}>
-                {provider.enabled ? 'ON' : 'OFF'}
+                {provider.enabled ? (language === 'zh' ? '开启' : 'ON') : (language === 'zh' ? '关闭' : 'OFF')}
               </span>
             </span>
-          </div>
+          </button>
         {/each}
       {/if}
     </div>
@@ -964,20 +1008,20 @@
       <div class="detail-header">
         {#if editingName}
           <input
+            bind:this={editNameInput}
             class="editable-name-input"
             bind:value={draftName}
             onblur={finishEditName}
             onkeydown={handleNameKeydown}
-            autofocus
           />
         {:else}
-          <h2 class="editable-name" onclick={startEditName} title={t.clickToEditName}>{draftName || selectedProvider.name}</h2>
+          <button type="button" class="editable-name" onclick={startEditName} title={t.clickToEditName}>{draftName || selectedProvider.name}</button>
         {/if}
         <label class="toggle-label">
           <span class="toggle-text">{draftEnabled ? t.enabled : t.disabled}</span>
-          <span class="toggle-switch" class:is-on={draftEnabled} onclick={() => draftEnabled = !draftEnabled}>
+          <button type="button" class="toggle-switch" class:is-on={draftEnabled} aria-pressed={draftEnabled} aria-label={draftEnabled ? t.enabled : t.disabled} onclick={() => draftEnabled = !draftEnabled}>
             <span class="toggle-thumb"></span>
-          </span>
+          </button>
         </label>
       </div>
 
@@ -999,7 +1043,7 @@
 
       <!-- API Key -->
       <div class="detail-section">
-        <label class="field-label">{t.apiKey}</label>
+        <span class="field-label">{t.apiKey}</span>
         <div class="key-input-row">
           <Input
             bind:value={draftApiKey}
@@ -1104,7 +1148,7 @@
       </div>
     {/if}
   </section>
-  {:else if activeNav === '常规设置'}
+  {:else if activeNav === 'generalSettings'}
     <section class="general-panel">
       <div class="detail-header">
         <h2>{t.generalSettings}</h2>
@@ -1113,9 +1157,13 @@
       <div class="detail-section">
         <label class="field-label">
           {t.language}
-          <select class="form-input" bind:value={language}>
-            <option value="zh">中文</option>
-            <option value="en">English</option>
+          <select
+            class="form-input"
+            value={language}
+            onchange={(e) => i18n.setLanguage((e.target as HTMLSelectElement).value as Language)}
+          >
+            <option value="zh">{language === 'en' ? 'Chinese' : '中文'}</option>
+            <option value="en">{language === 'en' ? 'English' : '英文'}</option>
           </select>
         </label>
       </div>
@@ -1135,13 +1183,13 @@
         <div class="general-switch-row">
           <span class="field-label">{t.autoLaunch}</span>
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span class="toggle-switch" class:is-on={autoLaunch} onclick={() => handleAutoLaunchChange(!autoLaunch)}>
+          <button type="button" class="toggle-switch" class:is-on={autoLaunch} aria-pressed={autoLaunch} aria-label={t.autoLaunch} onclick={() => handleAutoLaunchChange(!autoLaunch)}>
             <span class="toggle-thumb"></span>
-          </span>
+          </button>
         </div>
       </div>
     </section>
-  {:else if activeNav === '显示设置'}
+  {:else if activeNav === 'displaySettings'}
     <section class="general-panel">
       <div class="detail-header">
         <h2>{t.displaySettings}</h2>
@@ -1178,9 +1226,9 @@
         <div class="general-switch-row">
           <span class="field-label">{t.autoRename}</span>
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span class="toggle-switch" class:is-on={autoRename} onclick={() => { autoRename = !autoRename; }}>
+          <button type="button" class="toggle-switch" class:is-on={autoRename} aria-pressed={autoRename} aria-label={t.autoRename} onclick={() => { autoRename = !autoRename; }}>
             <span class="toggle-thumb"></span>
-          </span>
+          </button>
         </div>
         <p class="field-hint">{t.autoRenameHint}</p>
         {#if autoRename}
@@ -1205,9 +1253,9 @@
         <div class="general-switch-row">
           <span class="field-label">{t.autoCompress}</span>
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span class="toggle-switch" class:is-on={autoCompress} onclick={() => { autoCompress = !autoCompress; }}>
+          <button type="button" class="toggle-switch" class:is-on={autoCompress} aria-pressed={autoCompress} aria-label={t.autoCompress} onclick={() => { autoCompress = !autoCompress; }}>
             <span class="toggle-thumb"></span>
-          </span>
+          </button>
         </div>
         <p class="field-hint">{t.autoCompressHint}</p>
         {#if autoCompress}
@@ -1232,7 +1280,7 @@
         {/if}
       </div>
     </section>
-  {:else if activeNav === '数据设置'}
+  {:else if activeNav === 'dataSettings'}
     <section class="general-panel">
       <div class="detail-header">
         <h2>{t.dataSettings}</h2>
@@ -1284,9 +1332,9 @@
           <span class="data-row-label">{t.compactBackup}</span>
           <div class="data-row-content">
             <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <span class="toggle-switch" class:is-on={compactBackup} onclick={() => compactBackup = !compactBackup}>
+            <button type="button" class="toggle-switch" class:is-on={compactBackup} aria-pressed={compactBackup} aria-label={t.compactBackup} onclick={() => compactBackup = !compactBackup}>
               <span class="toggle-thumb"></span>
-            </span>
+            </button>
           </div>
         </div>
         <p class="field-hint">{t.compactBackupHint}</p>
@@ -1317,7 +1365,7 @@
         <p class="field-hint">{t.resetDataHint}</p>
       </div>
     </section>
-  {:else if activeNav === '关于我们'}
+  {:else if activeNav === 'about'}
     <section class="general-panel">
       <div class="detail-header">
         <h2>{t.about}</h2>
@@ -1334,12 +1382,12 @@
           href="https://github.com/oooyuy92/orion-chat-rs"
           target="_blank"
           rel="noopener noreferrer"
-          aria-label="GitHub"
+          aria-label={language === 'zh' ? 'GitHub 仓库' : 'GitHub repository'}
         >
           <svg height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.385-1.335-1.755-1.335-1.755-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 21.795 24 17.295 24 12c0-6.63-5.37-12-12-12z"/>
           </svg>
-          <span>GitHub</span>
+          <span>{language === 'zh' ? 'GitHub 仓库' : 'GitHub'}</span>
         </a>
       </div>
 
@@ -1347,9 +1395,9 @@
         <div class="general-switch-row">
           <span class="field-label">{t.autoUpdate}</span>
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <span class="toggle-switch" class:is-on={autoUpdate} onclick={() => { autoUpdate = !autoUpdate; }}>
+          <button type="button" class="toggle-switch" class:is-on={autoUpdate} aria-pressed={autoUpdate} aria-label={t.autoUpdate} onclick={() => { autoUpdate = !autoUpdate; }}>
             <span class="toggle-thumb"></span>
-          </span>
+          </button>
         </div>
       </div>
 
@@ -1367,7 +1415,7 @@
   {:else}
     <section class="placeholder-panel">
       <div class="empty-state">
-        <h3>{activeNav}</h3>
+        <h3>{navLabel(activeNav)}</h3>
         <p>{t.featureWip}</p>
       </div>
     </section>
@@ -1376,7 +1424,7 @@
 
 {#if contextMenu}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="context-overlay" onclick={closeContextMenu} oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}>
+  <div class="context-overlay" role="button" aria-label={i18n.t.close} tabindex="0" onclick={closeContextMenu} onkeydown={(e) => { if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ' ) { e.preventDefault(); closeContextMenu(); } }} oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}>
     <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
       {#if providers.length > 0 && providers[0].id !== contextMenu.providerId}
         <button class="context-item" onclick={handleSetDefault}>{t.setDefault}</button>
@@ -1479,6 +1527,7 @@
   }
 
   .provider-card {
+    appearance: none;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -1598,6 +1647,10 @@
   /* Editable Name */
   .editable-name {
     margin: 0;
+    background: transparent;
+    border: none;
+    color: var(--foreground);
+    text-align: left;
     font-size: 1.1rem;
     font-weight: 700;
     cursor: pointer;
@@ -1639,6 +1692,8 @@
   }
 
   .toggle-switch {
+    appearance: none;
+    padding: 0;
     position: relative;
     width: 2.4rem;
     height: 1.3rem;

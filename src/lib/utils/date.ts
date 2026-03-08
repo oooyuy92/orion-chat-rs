@@ -1,4 +1,5 @@
 import type { Conversation } from '$lib/types';
+import type { Language } from '$lib/stores/i18n.svelte';
 
 export function groupConversationsByTime(conversations: Conversation[]) {
   const now = new Date();
@@ -25,7 +26,7 @@ export function groupConversationsByTime(conversations: Conversation[]) {
   };
 }
 
-export function formatRelativeTime(date: string): string {
+export function formatRelativeTime(date: string, language: Language = 'en'): string {
   const now = new Date();
   const target = new Date(date);
   const diffMs = now.getTime() - target.getTime();
@@ -33,11 +34,19 @@ export function formatRelativeTime(date: string): string {
   const diffHours = Math.floor(diffMs / 3600000);
   const diffDays = Math.floor(diffMs / 86400000);
 
+  if (language === 'zh') {
+    if (diffMins < 1) return '刚刚';
+    if (diffMins < 60) return `${diffMins} 分钟前`;
+    if (diffHours < 24) return `${diffHours} 小时前`;
+    if (diffDays < 7) return `${diffDays} 天前`;
+    return target.toLocaleDateString('zh-CN');
+  }
+
   if (diffMins < 1) return 'Just now';
   if (diffMins < 60) return `${diffMins}m ago`;
   if (diffHours < 24) return `${diffHours}h ago`;
   if (diffDays < 7) return `${diffDays}d ago`;
-  return target.toLocaleDateString();
+  return target.toLocaleDateString('en-US');
 }
 
 function startOfDay(date: Date): Date {

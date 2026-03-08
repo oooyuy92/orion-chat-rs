@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Assistant } from '$lib/types';
   import { api } from '$lib/utils/invoke';
+  import { i18n } from '$lib/stores/i18n.svelte';
 
   let { onSelect }: { onSelect: (assistant: Assistant) => void } = $props();
 
@@ -19,7 +20,7 @@
 
   async function handleNew() {
     try {
-      const assistant = await api.createAssistant('New Assistant');
+      const assistant = await api.createAssistant(i18n.language === 'zh' ? '新助手' : 'New Assistant');
       assistants = [...assistants, assistant];
     } catch (e) {
       console.error('Failed to create assistant:', e);
@@ -48,15 +49,15 @@
       class="w-full py-2 px-3 rounded-lg text-sm font-medium cursor-pointer transition-colors"
       style="background-color: var(--accent); color: #fff; border: none;"
     >
-      + New Assistant
+      {i18n.t.newAssistant}
     </button>
   </div>
 
   <div class="flex-1 overflow-y-auto px-2 pb-2">
     {#if loading}
-      <p class="text-sm px-3 py-2" style="color: var(--text-secondary);">Loading...</p>
+      <p class="text-sm px-3 py-2" style="color: var(--text-secondary);">{i18n.t.loading}</p>
     {:else if assistants.length === 0}
-      <p class="text-sm px-3 py-2" style="color: var(--text-secondary);">No assistants yet</p>
+      <p class="text-sm px-3 py-2" style="color: var(--text-secondary);">{i18n.t.noAssistantsYet}</p>
     {:else}
       {#each assistants as assistant (assistant.id)}
         <button

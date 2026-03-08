@@ -2,6 +2,7 @@
   import type { ModelGroup, ProviderType } from '$lib/types';
   import ModelSelector from './ModelSelector.svelte';
   import ModelParamsPopover from './ModelParamsPopover.svelte';
+  import { i18n } from '$lib/stores/i18n.svelte';
 
   const PASTE_THRESHOLD = 500;
 
@@ -56,7 +57,7 @@
       span.className = 'paste-ref';
       span.contentEditable = 'false';
       span.dataset.pasteId = id;
-      span.textContent = `[${text.length} 字符]`;
+      span.textContent = i18n.pasteLabel(text.length);
 
       insertNodeAtCursor(span);
     } else {
@@ -165,7 +166,7 @@
       oninput={handleInput}
       onpaste={handlePaste}
       onkeydown={handleKeydown}
-      data-placeholder="What would you like to know?"
+      data-placeholder={i18n.t.inputPlaceholder}
     ></div>
 
     <div class="input-actions">
@@ -174,7 +175,7 @@
           class="send-button stop"
           type="button"
           onclick={() => onStop?.()}
-          aria-label="Stop"
+          aria-label={i18n.t.stop}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
             <rect x="4" y="4" width="16" height="16" rx="2" />
@@ -186,7 +187,7 @@
           type="button"
           onclick={submit}
           disabled={!hasContent}
-          aria-label="Send"
+          aria-label={i18n.t.send}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <line x1="12" y1="19" x2="12" y2="5"/>

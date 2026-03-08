@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Message } from '$lib/types';
   import MessageBubble from './MessageBubble.svelte';
+  import { i18n } from '$lib/stores/i18n.svelte';
 
   type MessageAction =
     | { type: 'delete'; messageId: string }
@@ -33,8 +34,8 @@
   <div class="conversation-stack">
     {#if messages.length === 0}
       <div class="empty-message-state">
-        <h2>No messages yet</h2>
-        <p>Ask anything to start the conversation.</p>
+        <h2>{i18n.t.noMessagesYet}</h2>
+        <p>{i18n.t.askAnything}</p>
       </div>
     {:else}
       {#each messages as message (message.id)}

@@ -7,6 +7,7 @@
   import CheckIcon from '@lucide/svelte/icons/check';
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
   import MessageSquarePlusIcon from '@lucide/svelte/icons/message-square-plus';
+  import { i18n } from '$lib/stores/i18n.svelte';
 
   type MessageAction =
     | { type: 'delete'; messageId: string }
@@ -103,7 +104,7 @@
       span.className = 'paste-ref';
       span.contentEditable = 'false';
       span.dataset.pasteId = id;
-      span.textContent = `[${match[1]} 字符]`;
+      span.textContent = i18n.pasteLabel(parseInt(match[1], 10));
       el.appendChild(span);
       lastIndex = match.index + match[0].length;
     }
@@ -139,7 +140,7 @@
       span.className = 'paste-ref';
       span.contentEditable = 'false';
       span.dataset.pasteId = id;
-      span.textContent = `[${text.length} 字符]`;
+      span.textContent = i18n.pasteLabel(text.length);
 
       const sel = window.getSelection();
       if (sel && sel.rangeCount > 0) {
@@ -227,6 +228,7 @@
   <!-- 用户消息：右对齐气泡，浅灰背景 -->
   <div
     class="flex w-full max-w-[95%] ml-auto justify-end"
+    role="presentation"
     onmouseenter={() => (isHovered = true)}
     onmouseleave={() => (isHovered = false)}
   >
@@ -249,13 +251,13 @@
               class="rounded-md px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted cursor-pointer"
               onclick={cancelEdit}
             >
-              取消
+              {i18n.t.cancel}
             </button>
             <button
               class="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground hover:bg-primary/90 cursor-pointer disabled:opacity-50"
               onclick={confirmEdit}
             >
-              重新发送
+              {i18n.t.resend}
             </button>
           </div>
         </div>
@@ -271,7 +273,7 @@
                   class="paste-tag"
                   onclick={() => (viewingPasteText = seg.value)}
                 >
-                  [{seg.length} 字符]
+                  {i18n.pasteLabel(seg.length)}
                 </button>
               {/if}
             {/each}
@@ -283,7 +285,7 @@
         {/if}
 
         {#if message.status === 'error'}
-          <div class="text-xs text-destructive px-1">Message generation failed.</div>
+          <div class="text-xs text-destructive px-1">{i18n.t.messageGenerationFailed}</div>
         {/if}
 
         <!-- Action buttons -->
@@ -300,21 +302,21 @@
           >
             <button
               class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
-              title="修改"
+              title={i18n.t.edit}
               onclick={startEdit}
             >
               <PencilIcon size={14} />
             </button>
             <button
               class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
-              title="重发"
+              title={i18n.t.resend}
               onclick={resend}
             >
               <RefreshCwIcon size={14} />
             </button>
             <button
               class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
-              title="复制"
+              title={copied ? i18n.t.copied : i18n.t.copy}
               onclick={copyToClipboard}
             >
               {#if copied}
@@ -325,7 +327,7 @@
             </button>
             <button
               class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
-              title="删除"
+              title={i18n.t.delete}
               onclick={deleteMessage}
             >
               <Trash2Icon size={14} />
@@ -339,6 +341,7 @@
   <!-- 助手消息：左对齐纯文本，无背景 -->
   <div
     class="flex w-full max-w-[95%]"
+    role="presentation"
     onmouseenter={() => (isHovered = true)}
     onmouseleave={() => (isHovered = false)}
   >
@@ -372,7 +375,7 @@
           class="w-fit rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
           onclick={() => (showReasoning = !showReasoning)}
         >
-          {showReasoning ? '收起思考' : '思考过程'}
+          {showReasoning ? i18n.t.hideReasoning : i18n.t.showReasoning}
         </button>
 
         {#if showReasoning}
@@ -389,7 +392,7 @@
       {/if}
 
       {#if message.status === 'error'}
-        <div class="text-xs text-destructive px-1">Message generation failed.</div>
+        <div class="text-xs text-destructive px-1">{i18n.t.messageGenerationFailed}</div>
       {/if}
 
       <!-- Assistant action buttons -->
@@ -406,21 +409,21 @@
         >
           <button
             class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
-            title="重新生成"
+            title={i18n.t.regenerate}
             onclick={regenerate}
           >
             <RefreshCwIcon size={14} />
           </button>
           <button
             class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
-            title="生成新版本"
+            title={i18n.t.generateNewVersion}
             onclick={generateVersion}
           >
             <MessageSquarePlusIcon size={14} />
           </button>
           <button
             class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
-            title="复制"
+            title={copied ? i18n.t.copied : i18n.t.copy}
             onclick={copyToClipboard}
           >
             {#if copied}
@@ -431,7 +434,7 @@
           </button>
           <button
             class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
-            title="删除"
+            title={i18n.t.delete}
             onclick={deleteMessage}
           >
             <Trash2Icon size={14} />
@@ -446,7 +449,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="content-overlay" onclick={() => (viewingPasteText = '')} onkeydown={(e) => { if (e.key === 'Escape') viewingPasteText = ''; }}>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="content-modal" onclick={(e) => e.stopPropagation()}>
+    <div class="content-modal" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
       <div class="content-body">{viewingPasteText}</div>
     </div>
   </div>

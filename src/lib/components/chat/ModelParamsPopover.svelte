@@ -16,6 +16,7 @@
   import { Button } from '$lib/components/ui/button';
   import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
   import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+  import { i18n } from '$lib/stores/i18n.svelte';
 
   let {
     modelId,
@@ -70,6 +71,35 @@
   }
 
   // ---- Common handlers ----
+
+  function thinkingModeLabel(mode: string) {
+    switch (mode) {
+      case 'adaptive':
+        return i18n.t.adaptive;
+      case 'enabled':
+        return i18n.t.enabled;
+      default:
+        return i18n.t.disabled;
+    }
+  }
+
+  function levelLabel(value: string) {
+    switch (value) {
+      case 'low':
+        return i18n.t.low;
+      case 'medium':
+        return i18n.t.medium;
+      case 'high':
+        return i18n.t.high;
+      default:
+        return i18n.t.default;
+    }
+  }
+
+  function thinkLabel(value: boolean | null) {
+    if (value === null) return i18n.t.default;
+    return value ? i18n.t.on : i18n.t.off;
+  }
 
   function setTemperature(v: number) { common = { ...common, temperature: v }; save(); }
   function setTopP(v: number) { common = { ...common, topP: v }; save(); }
@@ -191,7 +221,7 @@
 <Popover>
   <PopoverTrigger>
     {#snippet child({ props })}
-      <button {...props} class="params-trigger" disabled={disabled} aria-label="Model parameters">
+      <button {...props} class="params-trigger" disabled={disabled} aria-label={i18n.t.modelParameters}>
         <SlidersHorizontalIcon class="h-3.5 w-3.5" />
       </button>
     {/snippet}
@@ -199,20 +229,20 @@
   <PopoverContent class="params-popover" align="start">
     <div class="params-scroll">
       <div class="params-header">
-        <span class="params-title">Parameters</span>
-        <button class="reset-btn" onclick={reset} aria-label="Reset to defaults">
+        <span class="params-title">{i18n.t.parameters}</span>
+        <button class="reset-btn" onclick={reset} aria-label={i18n.t.resetToDefaults}>
           <RotateCcwIcon class="h-3 w-3" />
-          <span>Reset</span>
+          <span>{i18n.t.reset}</span>
         </button>
       </div>
 
       <!-- Common params -->
       <fieldset class="param-section">
-        <legend class="section-label">Common</legend>
+        <legend class="section-label">{i18n.t.common}</legend>
 
         <div class="param-row">
           <div class="param-label-row">
-            <label>Temperature</label>
+            <span>{i18n.t.temperature}</span>
             <span class="param-value">{common.temperature ?? '—'}</span>
           </div>
           <Slider
@@ -225,7 +255,7 @@
 
         <div class="param-row">
           <div class="param-label-row">
-            <label>Top P</label>
+            <span>{i18n.t.topP}</span>
             <span class="param-value">{common.topP ?? '—'}</span>
           </div>
           <Slider
@@ -237,10 +267,10 @@
         </div>
 
         <div class="param-row">
-          <label>Max Tokens</label>
+          <span>{i18n.t.maxTokens}</span>
           <Input
             type="number"
-            placeholder="Default"
+            placeholder={i18n.t.default}
             value={common.maxTokens ?? ''}
             onchange={setMaxTokens}
             class="param-input"
@@ -254,21 +284,21 @@
           <legend class="section-label">Anthropic</legend>
 
           <div class="param-row">
-            <label>Thinking</label>
+            <span>{i18n.t.thinking}</span>
             <div class="btn-group">
               {#each ['disabled', 'adaptive', 'enabled'] as mode}
                 <button
                   class="btn-option"
                   class:active={getThinkingMode() === mode}
                   onclick={() => setThinkingMode(mode)}
-                >{mode}</button>
+                >{thinkingModeLabel(mode)}</button>
               {/each}
             </div>
           </div>
 
           {#if getThinkingMode() === 'enabled'}
             <div class="param-row">
-              <label>Budget Tokens</label>
+              <span>{i18n.t.budgetTokens}</span>
               <Input
                 type="number"
                 placeholder="10000"
@@ -280,23 +310,23 @@
           {/if}
 
           <div class="param-row">
-            <label>Effort</label>
+            <span>{i18n.t.effort}</span>
             <div class="btn-group">
-              {#each [['', 'Default'], ['low', 'Low'], ['medium', 'Med'], ['high', 'High']] as [val, label]}
+              {#each ['', 'low', 'medium', 'high'] as val}
                 <button
                   class="btn-option"
                   class:active={String(providerParams.effort ?? '') === val}
                   onclick={() => setAnthropicEffort(val)}
-                >{label}</button>
+                >{levelLabel(val)}</button>
               {/each}
             </div>
           </div>
 
           <div class="param-row">
-            <label>Top K</label>
+            <span>Top K</span>
             <Input
               type="number"
-              placeholder="Default"
+              placeholder={i18n.t.default}
               value={providerParams.topK ?? ''}
               onchange={setAnthropicTopK}
               class="param-input"
@@ -311,23 +341,23 @@
           <legend class="section-label">Gemini</legend>
 
           <div class="param-row">
-            <label>Thinking Level</label>
+            <span>{i18n.t.thinkingLevel}</span>
             <div class="btn-group">
-              {#each [['', 'Default'], ['low', 'Low'], ['medium', 'Med'], ['high', 'High']] as [val, label]}
+              {#each ['', 'low', 'medium', 'high'] as val}
                 <button
                   class="btn-option"
                   class:active={String(providerParams.thinkingLevel ?? '') === val}
                   onclick={() => setGeminiThinkingLevel(val)}
-                >{label}</button>
+                >{levelLabel(val)}</button>
               {/each}
             </div>
           </div>
 
           <div class="param-row">
-            <label>Thinking Budget</label>
+            <span>{i18n.t.thinkingBudget}</span>
             <Input
               type="number"
-              placeholder="Default"
+              placeholder={i18n.t.default}
               value={providerParams.thinkingBudget ?? ''}
               onchange={setGeminiThinkingBudget}
               class="param-input"
@@ -343,7 +373,7 @@
 
           <div class="param-row">
             <div class="param-label-row">
-              <label>Frequency Penalty</label>
+              <span>{i18n.t.frequencyPenalty}</span>
               <span class="param-value">{providerParams.frequencyPenalty ?? '—'}</span>
             </div>
             <Slider
@@ -356,7 +386,7 @@
 
           <div class="param-row">
             <div class="param-label-row">
-              <label>Presence Penalty</label>
+              <span>{i18n.t.presencePenalty}</span>
               <span class="param-value">{providerParams.presencePenalty ?? '—'}</span>
             </div>
             <Slider
@@ -368,23 +398,23 @@
           </div>
 
           <div class="param-row">
-            <label>Reasoning Effort</label>
+            <span>{i18n.t.reasoningEffort}</span>
             <div class="btn-group">
-              {#each [['', 'Default'], ['low', 'Low'], ['medium', 'Med'], ['high', 'High']] as [val, label]}
+              {#each ['', 'low', 'medium', 'high'] as val}
                 <button
                   class="btn-option"
                   class:active={String(providerParams.reasoningEffort ?? '') === val}
                   onclick={() => setReasoningEffort(val)}
-                >{label}</button>
+                >{levelLabel(val)}</button>
               {/each}
             </div>
           </div>
 
           <div class="param-row">
-            <label>Seed</label>
+            <span>{i18n.t.seed}</span>
             <Input
               type="number"
-              placeholder="Default"
+              placeholder={i18n.t.default}
               value={providerParams.seed ?? ''}
               onchange={setOpenAISeed}
               class="param-input"
@@ -392,10 +422,10 @@
           </div>
 
           <div class="param-row">
-            <label>Max Completion Tokens</label>
+            <span>{i18n.t.maxCompletionTokens}</span>
             <Input
               type="number"
-              placeholder="Default"
+              placeholder={i18n.t.default}
               value={providerParams.maxCompletionTokens ?? ''}
               onchange={setMaxCompletionTokens}
               class="param-input"
@@ -410,23 +440,23 @@
           <legend class="section-label">Ollama</legend>
 
           <div class="param-row">
-            <label>Think</label>
+            <span>{i18n.t.think}</span>
             <div class="btn-group">
-              {#each [[null, 'Default'], [true, 'On'], [false, 'Off']] as [val, label]}
+              {#each [null, true, false] as val}
                 <button
                   class="btn-option"
                   class:active={providerParams.think === val}
                   onclick={() => setOllamaThink(val as boolean)}
-                >{label}</button>
+                >{thinkLabel(val)}</button>
               {/each}
             </div>
           </div>
 
           <div class="param-row">
-            <label>Num Ctx</label>
+            <span>{i18n.t.numCtx}</span>
             <Input
               type="number"
-              placeholder="Default"
+              placeholder={i18n.t.default}
               value={providerParams.numCtx ?? ''}
               onchange={setNumCtx}
               class="param-input"
@@ -435,7 +465,7 @@
 
           <div class="param-row">
             <div class="param-label-row">
-              <label>Repeat Penalty</label>
+              <span>{i18n.t.repeatPenalty}</span>
               <span class="param-value">{providerParams.repeatPenalty ?? '—'}</span>
             </div>
             <Slider
@@ -448,7 +478,7 @@
 
           <div class="param-row">
             <div class="param-label-row">
-              <label>Min P</label>
+              <span>{i18n.t.minP}</span>
               <span class="param-value">{providerParams.minP ?? '—'}</span>
             </div>
             <Slider
@@ -460,7 +490,7 @@
           </div>
 
           <div class="param-row">
-            <label>Keep Alive</label>
+            <span>{i18n.t.keepAlive}</span>
             <Input
               type="text"
               placeholder="5m"
@@ -562,7 +592,7 @@
     margin-bottom: 0.55rem;
   }
 
-  .param-row label {
+  .param-row span {
     display: block;
     font-size: 0.8125rem;
     color: var(--foreground);

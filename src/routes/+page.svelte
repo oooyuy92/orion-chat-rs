@@ -9,6 +9,7 @@
   import { getModelParams } from '$lib/stores/modelParams';
   import type { ChatEvent } from '$lib/utils/invoke';
   import type { Message, ModelGroup, ProviderType } from '$lib/types';
+  import { i18n } from '$lib/stores/i18n.svelte';
 
   let activeConversationId = $state('');
   let messages = $state<Message[]>([]);
@@ -731,7 +732,7 @@
       />
     {:else}
       <div class="flex h-full items-center justify-center text-muted-foreground">
-        <p class="text-sm">Select or create a conversation to start chatting</p>
+        <p class="text-sm">{i18n.t.selectConversationPrompt}</p>
       </div>
     {/if}
   </SidebarInset>

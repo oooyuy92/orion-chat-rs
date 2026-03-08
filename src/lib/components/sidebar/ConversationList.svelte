@@ -4,6 +4,7 @@
   import type { Conversation } from '$lib/types';
   import { api } from '$lib/utils/invoke';
   import { groupConversationsByTime } from '$lib/utils/date';
+  import { i18n, type ConversationGroupKey } from '$lib/stores/i18n.svelte';
   import { titleUpdates } from '$lib/stores/conversations';
   import {
     SidebarGroup,
@@ -175,7 +176,7 @@
 
   async function handleNewChat() {
     try {
-      const conversation = await api.createConversation('New Chat');
+      const conversation = await api.createConversation(i18n.t.newChatTitle);
       conversations = [conversation, ...conversations];
       activeId = conversation.id;
       onSelect(conversation.id);
@@ -213,7 +214,7 @@
           bind:this={prefixInput}
           bind:value={prefixValue}
           class="rename-input prefix-input"
-          placeholder="前缀…"
+          placeholder={i18n.t.prefixPlaceholder}
           onblur={commitPrefix}
           onkeydown={handlePrefixKey}
           onclick={(e: MouseEvent) => e.stopPropagation()}
@@ -237,18 +238,18 @@
 
 <div class="conversation-sidebar">
   <div class="sidebar-head">
-    <button onclick={handleNewChat} class="new-chat-button">+ New Chat</button>
+    <button onclick={handleNewChat} class="new-chat-button">{i18n.t.newChat}</button>
   </div>
 
   <div class="sidebar-list">
     {#if loading}
-      <p class="sidebar-status">Loading conversations...</p>
+      <p class="sidebar-status">{i18n.t.loadingConversations}</p>
     {:else if conversations.length === 0}
-      <p class="sidebar-status">No conversations yet</p>
+      <p class="sidebar-status">{i18n.t.noConversationsYet}</p>
     {:else}
       {#if pinned.length > 0}
         <SidebarGroup>
-          <SidebarGroupLabel>已固定</SidebarGroupLabel>
+          <SidebarGroupLabel>{i18n.t.pinned}</SidebarGroupLabel>
           <SidebarMenu>
             {#each pinned as conversation (conversation.id)}
               {@render convItem(conversation)}
@@ -258,15 +259,15 @@
       {/if}
 
       {#each [
-        { label: 'Today', items: grouped.today },
-        { label: 'Yesterday', items: grouped.yesterday },
-        { label: 'Last 7 days', items: grouped.last7Days },
-        { label: 'Last 30 days', items: grouped.last30Days },
-        { label: 'Older', items: grouped.older },
-      ] as group (group.label)}
+        { key: 'today', items: grouped.today },
+        { key: 'yesterday', items: grouped.yesterday },
+        { key: 'last7Days', items: grouped.last7Days },
+        { key: 'last30Days', items: grouped.last30Days },
+        { key: 'older', items: grouped.older },
+      ] as group (group.key)}
         {#if group.items.length > 0}
           <SidebarGroup>
-            <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
+            <SidebarGroupLabel>{i18n.conversationGroupLabel(group.key as ConversationGroupKey)}</SidebarGroupLabel>
             <SidebarMenu>
               {#each group.items as conversation (conversation.id)}
                 {@render convItem(conversation)}
@@ -283,16 +284,25 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="context-overlay"
+    role="button"
+    aria-label={i18n.t.close}
+    tabindex="0"
     onclick={closeContextMenu}
+    onkeydown={(e) => {
+      if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        closeContextMenu();
+      }
+    }}
     oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}
   >
     <div class="context-menu" style="left: {contextMenu.x}px; top: {contextMenu.y}px;">
-      <button class="context-item" onclick={() => startRename(contextMenu!.id)}>重命名</button>
-      <button class="context-item" onclick={() => startPrefix(contextMenu!.id)}>添加前缀</button>
+      <button class="context-item" onclick={() => startRename(contextMenu!.id)}>{i18n.t.rename}</button>
+      <button class="context-item" onclick={() => startPrefix(contextMenu!.id)}>{i18n.t.addPrefix}</button>
       <button class="context-item" onclick={() => handlePin(contextMenu!.id)}>
-        {conversations.find((c) => c.id === contextMenu?.id)?.isPinned ? '取消固定' : '固定'}
+        {conversations.find((c) => c.id === contextMenu?.id)?.isPinned ? i18n.t.unpin : i18n.t.pin}
       </button>
-      <button class="context-item danger" onclick={() => handleDelete(contextMenu!.id)}>删除</button>
+      <button class="context-item danger" onclick={() => handleDelete(contextMenu!.id)}>{i18n.t.delete}</button>
     </div>
   </div>
 {/if}
