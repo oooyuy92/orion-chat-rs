@@ -1,6 +1,7 @@
 pub mod assistants;
 pub mod conversations;
 pub mod messages;
+pub mod paste_blobs;
 pub mod migrations;
 
 use rusqlite::Connection;

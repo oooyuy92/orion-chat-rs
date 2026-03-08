@@ -3,7 +3,7 @@ import type { CommonParams, ProviderParams, ModelParams, ProviderType } from '$l
 
 const STORE_NAME = 'model-params.json';
 
-function defaultProviderParams(providerType: ProviderType): ProviderParams {
+export function defaultProviderParams(providerType: ProviderType): ProviderParams {
   switch (providerType) {
     case 'anthropic':
       return { provider_type: 'anthropic' };
@@ -16,7 +16,7 @@ function defaultProviderParams(providerType: ProviderType): ProviderParams {
   }
 }
 
-function providerTypeToTag(pt: ProviderType): ProviderParams['provider_type'] {
+export function providerTypeToTag(pt: ProviderType): ProviderParams['provider_type'] {
   switch (pt) {
     case 'anthropic': return 'anthropic';
     case 'gemini': return 'gemini';
@@ -25,16 +25,22 @@ function providerTypeToTag(pt: ProviderType): ProviderParams['provider_type'] {
   }
 }
 
+export function alignProviderParams(
+  providerType: ProviderType,
+  providerParams: ProviderParams | null | undefined,
+): ProviderParams {
+  const expectedTag = providerTypeToTag(providerType);
+  return providerParams?.provider_type === expectedTag
+    ? providerParams
+    : defaultProviderParams(providerType);
+}
+
 export async function getModelParams(modelId: string, providerType: ProviderType): Promise<ModelParams> {
   try {
     const store = await loadStore(STORE_NAME);
     const saved = await store.get<ModelParams>(modelId);
     if (saved) {
-      // Ensure provider_type tag matches (in case provider changed)
-      const expectedTag = providerTypeToTag(providerType);
-      if (saved.providerParams?.provider_type !== expectedTag) {
-        saved.providerParams = defaultProviderParams(providerType);
-      }
+      saved.providerParams = alignProviderParams(providerType, saved.providerParams);
       return saved;
     }
   } catch {

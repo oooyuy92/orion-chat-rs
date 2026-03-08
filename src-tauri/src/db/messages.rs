@@ -86,6 +86,11 @@ pub fn create(conn: &Connection, msg: &Message) -> AppResult<()> {
     Ok(())
 }
 
+pub struct MessagePage {
+    pub messages: Vec<Message>,
+    pub has_more: bool,
+}
+
 pub fn list_by_conversation(conn: &Connection, conversation_id: &str) -> AppResult<Vec<Message>> {
     let sql = format!(
         "SELECT {SELECT_COLS},
@@ -103,6 +108,95 @@ pub fn list_by_conversation(conn: &Connection, conversation_id: &str) -> AppResu
         result.push(row?);
     }
     Ok(result)
+}
+
+pub fn list_page_by_conversation(
+    conn: &Connection,
+    conversation_id: &str,
+    limit: usize,
+    before_message_id: Option<&str>,
+) -> AppResult<MessagePage> {
+    if limit == 0 {
+        return Ok(MessagePage {
+            messages: Vec::new(),
+            has_more: false,
+        });
+    }
+
+    let page_sql = match before_message_id {
+        Some(_) => format!(
+            "SELECT {SELECT_COLS}, total_versions FROM (
+                SELECT {SELECT_COLS},
+                    CASE WHEN version_group_id IS NULL THEN 1
+                    ELSE (SELECT COUNT(*) FROM messages m2 WHERE m2.version_group_id = messages.version_group_id AND m2.deleted_at IS NULL)
+                    END as total_versions,
+                    rowid as sort_rowid
+                FROM messages
+                WHERE conversation_id = ?1
+                  AND deleted_at IS NULL
+                  AND is_active_version = 1
+                  AND rowid < (SELECT rowid FROM messages WHERE id = ?2)
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?3
+             ) page
+             ORDER BY created_at ASC, sort_rowid ASC"
+        ),
+        None => format!(
+            "SELECT {SELECT_COLS}, total_versions FROM (
+                SELECT {SELECT_COLS},
+                    CASE WHEN version_group_id IS NULL THEN 1
+                    ELSE (SELECT COUNT(*) FROM messages m2 WHERE m2.version_group_id = messages.version_group_id AND m2.deleted_at IS NULL)
+                    END as total_versions,
+                    rowid as sort_rowid
+                FROM messages
+                WHERE conversation_id = ?1
+                  AND deleted_at IS NULL
+                  AND is_active_version = 1
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?2
+             ) page
+             ORDER BY created_at ASC, sort_rowid ASC"
+        ),
+    };
+
+    let mut stmt = conn.prepare(&page_sql)?;
+    let mut messages = Vec::new();
+    match before_message_id {
+        Some(before_id) => {
+            let rows = stmt.query_map(rusqlite::params![conversation_id, before_id, limit], row_to_message_with_total)?;
+            for row in rows {
+                messages.push(row?);
+            }
+        }
+        None => {
+            let rows = stmt.query_map(rusqlite::params![conversation_id, limit], row_to_message_with_total)?;
+            for row in rows {
+                messages.push(row?);
+            }
+        }
+    }
+
+    let Some(first_message) = messages.first() else {
+        return Ok(MessagePage {
+            messages,
+            has_more: false,
+        });
+    };
+
+    let has_more: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM messages
+            WHERE conversation_id = ?1
+              AND deleted_at IS NULL
+              AND is_active_version = 1
+              AND rowid < (SELECT rowid FROM messages WHERE id = ?2)
+        )",
+        rusqlite::params![conversation_id, first_message.id],
+        |row| row.get(0),
+    )?;
+
+    Ok(MessagePage { messages, has_more })
 }
 
 /// Load messages before a given message (by rowid). Used to build context for version generation.
@@ -442,6 +536,34 @@ mod tests {
             let results = search(conn, "rust")?;
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].id, "m1");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_list_by_conversation_page() {
+        let db = Database::new(":memory:").unwrap();
+        db.with_conn(|conn| {
+            make_conv(conn);
+            for idx in 1..=6 {
+                create(conn, &make_msg(&format!("m{idx}"), &format!("msg-{idx}")))?;
+            }
+
+            soft_delete(conn, "m2")?;
+            conn.execute(
+                "UPDATE messages SET is_active_version = 0 WHERE id = ?1",
+                ["m5"],
+            )?;
+
+            let latest = list_page_by_conversation(conn, "conv-1", 3, None)?;
+            assert_eq!(latest.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["m3", "m4", "m6"]);
+            assert!(latest.has_more);
+
+            let older = list_page_by_conversation(conn, "conv-1", 3, Some("m3"))?;
+            assert_eq!(older.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["m1"]);
+            assert!(!older.has_more);
+
             Ok(())
         })
         .unwrap();

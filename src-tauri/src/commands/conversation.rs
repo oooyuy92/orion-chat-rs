@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
+use rusqlite::Connection;
 use tauri::State;
 
 use crate::db;
 use crate::error::{AppError, AppResult};
-use crate::models::{Conversation, Message, MessageStatus, Role};
+use crate::models::{Conversation, MessageStatus, PagedMessages, Role};
+use crate::paste_storage;
 
 /// Lightweight version info for version tabs.
 #[derive(serde::Serialize)]
@@ -15,6 +17,86 @@ pub struct VersionInfo {
     pub id: String,
 }
 use crate::state::AppState;
+
+fn resolve_paste_blob_path(state: &AppState, paste_id: &str) -> AppResult<String> {
+    state.db.with_conn(|conn| Ok(db::paste_blobs::get(conn, paste_id)?.file_path))
+}
+
+fn persist_external_pastes(
+    state: &AppState,
+    conversation_id: &str,
+    message_id: &str,
+    content: &str,
+    created_at: &str,
+) -> AppResult<String> {
+    paste_storage::externalize_legacy_inline_pastes(content, |text, _count| {
+        let paste_id = uuid::Uuid::new_v4().to_string();
+        let persisted = paste_storage::persist_paste_blob(&state.data_dir, &paste_id, text)?;
+        state.db.with_conn(|conn| {
+            db::paste_blobs::create(
+                conn,
+                &paste_id,
+                conversation_id,
+                message_id,
+                persisted.char_count,
+                &persisted.file_path,
+                text,
+                created_at,
+            )
+        })?;
+        Ok(format!("<<paste-ref:{paste_id}:{}>>", persisted.char_count))
+    })
+}
+
+fn delete_message_pastes(state: &AppState, message_id: &str) -> AppResult<()> {
+    let blobs = state.db.with_conn(|conn| db::paste_blobs::list_by_message(conn, message_id))?;
+    for blob in &blobs {
+        paste_storage::delete_paste_blob_file(&state.data_dir, &blob.file_path)?;
+    }
+    state.db.with_conn(|conn| db::paste_blobs::delete_by_message(conn, message_id))?;
+    Ok(())
+}
+
+fn delete_conversation_pastes(state: &AppState, conversation_id: &str) -> AppResult<()> {
+    let blobs = state.db.with_conn(|conn| db::paste_blobs::list_by_conversation(conn, conversation_id))?;
+    for blob in &blobs {
+        paste_storage::delete_paste_blob_file(&state.data_dir, &blob.file_path)?;
+    }
+    state.db.with_conn(|conn| db::paste_blobs::delete_by_conversation(conn, conversation_id))?;
+    Ok(())
+}
+
+fn ensure_assistant_exists(
+    conn: &Connection,
+    assistant_id: Option<&str>,
+) -> AppResult<()> {
+    if let Some(assistant_id) = assistant_id {
+        db::assistants::get(conn, assistant_id)?;
+    }
+    Ok(())
+}
+
+fn ensure_conversation_assistant_can_change(
+    conn: &Connection,
+    conversation_id: &str,
+) -> AppResult<()> {
+    let has_user_messages: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM messages
+            WHERE conversation_id = ?1 AND role = 'user' AND deleted_at IS NULL
+        )",
+        [conversation_id],
+        |row| row.get(0),
+    )?;
+
+    if has_user_messages {
+        return Err(AppError::Provider(
+            "Conversation assistant is locked after the first user message".into(),
+        ));
+    }
+
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn create_conversation(
@@ -59,6 +141,7 @@ pub async fn delete_conversation(
     state: State<'_, Arc<AppState>>,
     id: String,
 ) -> AppResult<()> {
+    delete_conversation_pastes(&state, &id)?;
     state.db.with_conn(|conn| db::conversations::delete(conn, &id))
 }
 
@@ -69,6 +152,20 @@ pub async fn pin_conversation(
     is_pinned: bool,
 ) -> AppResult<()> {
     state.db.with_conn(|conn| db::conversations::update_pin(conn, &id, is_pinned))
+}
+
+#[tauri::command]
+pub async fn update_conversation_assistant(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    assistant_id: Option<String>,
+) -> AppResult<()> {
+    state.db.with_conn(|conn| {
+        db::conversations::get(conn, &id)?;
+        ensure_assistant_exists(conn, assistant_id.as_deref())?;
+        ensure_conversation_assistant_can_change(conn, &id)?;
+        db::conversations::update_assistant(conn, &id, assistant_id.as_deref())
+    })
 }
 
 #[tauri::command]
@@ -211,12 +308,35 @@ pub async fn generate_conversation_title(
     Ok(title)
 }
 
+fn load_messages_page(
+    conn: &Connection,
+    conversation_id: &str,
+    limit: Option<u32>,
+    before_message_id: Option<&str>,
+) -> AppResult<PagedMessages> {
+    let page = db::messages::list_page_by_conversation(
+        conn,
+        conversation_id,
+        limit.unwrap_or(100) as usize,
+        before_message_id,
+    )?;
+
+    Ok(PagedMessages {
+        messages: page.messages,
+        has_more: page.has_more,
+    })
+}
+
 #[tauri::command]
 pub async fn get_messages(
     state: State<'_, Arc<AppState>>,
     conversation_id: String,
-) -> AppResult<Vec<Message>> {
-    state.db.with_conn(|conn| db::messages::list_by_conversation(conn, &conversation_id))
+    limit: Option<u32>,
+    before_message_id: Option<String>,
+) -> AppResult<PagedMessages> {
+    state.db.with_conn(|conn| {
+        load_messages_page(conn, &conversation_id, limit, before_message_id.as_deref())
+    })
 }
 
 #[tauri::command]
@@ -262,7 +382,46 @@ pub async fn update_message_content(
     id: String,
     content: String,
 ) -> AppResult<()> {
-    state.db.with_conn(|conn| db::messages::update_text(conn, &id, &content))
+    let (conversation_id, created_at): (String, String) = state.db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT conversation_id, created_at FROM messages WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| AppError::NotFound(format!("Message {id}")))
+    })?;
+    delete_message_pastes(&state, &id)?;
+    let persisted_content = persist_external_pastes(&state, &conversation_id, &id, &content, &created_at)?;
+    state.db.with_conn(|conn| db::messages::update_text(conn, &id, &persisted_content))
+}
+
+#[tauri::command]
+pub async fn get_paste_blob_content(
+    state: State<'_, Arc<AppState>>,
+    paste_id: String,
+) -> AppResult<String> {
+    let relative_path = resolve_paste_blob_path(&state, &paste_id)?;
+    paste_storage::read_paste_blob(&state.data_dir, &relative_path)
+}
+
+#[tauri::command]
+pub async fn hydrate_paste_content(
+    state: State<'_, Arc<AppState>>,
+    content: String,
+) -> AppResult<String> {
+    paste_storage::hydrate_paste_refs_to_legacy_markers(&state.data_dir, &content, &|paste_id| {
+        resolve_paste_blob_path(&state, paste_id)
+    })
+}
+
+#[tauri::command]
+pub async fn expand_paste_content(
+    state: State<'_, Arc<AppState>>,
+    content: String,
+) -> AppResult<String> {
+    paste_storage::expand_paste_refs_to_plain_text(&state.data_dir, &content, &|paste_id| {
+        resolve_paste_blob_path(&state, paste_id)
+    })
 }
 
 #[tauri::command]
@@ -302,4 +461,143 @@ pub async fn get_version_models(
     state
         .db
         .with_conn(|conn| db::messages::get_version_models(conn, &version_group_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Database;
+    use crate::models::{Assistant, Message};
+
+    fn make_conversation(id: &str) -> Conversation {
+        Conversation {
+            id: id.into(),
+            title: "Test".into(),
+            assistant_id: None,
+            model_id: None,
+            is_pinned: false,
+            sort_order: 0,
+            created_at: "2025-01-01T00:00:00".into(),
+            updated_at: "2025-01-01T00:00:00".into(),
+        }
+    }
+
+    fn make_assistant(id: &str) -> Assistant {
+        Assistant {
+            id: id.into(),
+            name: "Helper".into(),
+            icon: None,
+            system_prompt: Some("You are helpful.".into()),
+            model_id: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            extra_params: serde_json::json!({}),
+            sort_order: 0,
+            created_at: "2025-01-01T00:00:00".into(),
+        }
+    }
+
+    fn make_user_message(id: &str, conversation_id: &str) -> Message {
+        Message {
+            id: id.into(),
+            conversation_id: conversation_id.into(),
+            role: Role::User,
+            content: "hello".into(),
+            reasoning: None,
+            model_id: None,
+            status: MessageStatus::Done,
+            token_count: None,
+            created_at: "2025-01-01T00:00:00".into(),
+            version_group_id: None,
+            version_number: 1,
+            total_versions: 1,
+        }
+    }
+
+    #[test]
+    fn test_binding_allowed_without_user_messages() {
+        let db = Database::new(":memory:").unwrap();
+
+        db.with_conn(|conn| {
+            db::conversations::create(conn, &make_conversation("conv-1"))?;
+            db::assistants::create(conn, &make_assistant("assistant-1"))?;
+
+            ensure_conversation_assistant_can_change(conn, "conv-1")?;
+            ensure_assistant_exists(conn, Some("assistant-1"))?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_binding_rejected_after_first_user_message() {
+        let db = Database::new(":memory:").unwrap();
+
+        let err = db
+            .with_conn(|conn| {
+                db::conversations::create(conn, &make_conversation("conv-1"))?;
+                db::messages::create(conn, &make_user_message("msg-1", "conv-1"))?;
+                ensure_conversation_assistant_can_change(conn, "conv-1")
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::Provider(_)));
+    }
+
+    #[test]
+    fn test_binding_rejected_for_unknown_assistant() {
+        let db = Database::new(":memory:").unwrap();
+
+        let err = db
+            .with_conn(|conn| {
+                db::conversations::create(conn, &make_conversation("conv-1"))?;
+                ensure_assistant_exists(conn, Some("missing-assistant"))
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_binding_allowed_when_only_deleted_user_messages_exist() {
+        let db = Database::new(":memory:").unwrap();
+
+        db.with_conn(|conn| {
+            db::conversations::create(conn, &make_conversation("conv-1"))?;
+            db::messages::create(conn, &make_user_message("msg-1", "conv-1"))?;
+            db::messages::soft_delete(conn, "msg-1")?;
+
+            ensure_conversation_assistant_can_change(conn, "conv-1")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_get_messages_page() {
+        let db = Database::new(":memory:").unwrap();
+
+        db.with_conn(|conn| {
+            db::conversations::create(conn, &make_conversation("conv-1"))?;
+            for idx in 1..=5 {
+                db::messages::create(conn, &make_user_message(&format!("msg-{idx}"), "conv-1"))?;
+                db::messages::update_text(conn, &format!("msg-{idx}"), &format!("message-{idx}"))?;
+            }
+
+            let latest = load_messages_page(conn, "conv-1", Some(2), None)?;
+            assert!(latest.has_more);
+            assert_eq!(latest.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["msg-4", "msg-5"]);
+
+            let older = load_messages_page(conn, "conv-1", Some(2), Some("msg-4"))?;
+            assert!(older.has_more);
+            assert_eq!(older.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["msg-2", "msg-3"]);
+
+            let oldest = load_messages_page(conn, "conv-1", Some(2), Some("msg-2"))?;
+            assert!(!oldest.has_more);
+            assert_eq!(oldest.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec!["msg-1"]);
+
+            Ok(())
+        })
+        .unwrap();
+    }
 }

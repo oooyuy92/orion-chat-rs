@@ -8,15 +8,28 @@
   import { titleUpdates } from '$lib/stores/conversations';
   import { getModelParams } from '$lib/stores/modelParams';
   import type { ChatEvent } from '$lib/utils/invoke';
-  import type { Message, ModelGroup, ProviderType } from '$lib/types';
+  import type { Assistant, Conversation, Message, ModelGroup, ProviderType } from '$lib/types';
   import { i18n } from '$lib/stores/i18n.svelte';
 
   let activeConversationId = $state('');
   let messages = $state<Message[]>([]);
+  const pageSize = 100;
+  let hasMoreMessages = $state(false);
+  let isLoadingMoreMessages = $state(false);
   let isStreaming = $state(false);
   let streamingMessageId = $state('');
   let currentModelId = $state('');
   let modelGroups = $state<ModelGroup[]>([]);
+  let assistants = $state<Assistant[]>([]);
+  let conversations = $state<Conversation[]>([]);
+
+  const currentConversation = $derived(
+    conversations.find((conversation) => conversation.id === activeConversationId) ?? null,
+  );
+  const selectedAssistantId = $derived(currentConversation?.assistantId ?? null);
+  const assistantSelectionLocked = $derived.by(() =>
+    messages.some((message) => message.role === 'user'),
+  );
 
   // Soft-delete restore state
   let deletedMessageIds = $state<string[]>([]);
@@ -85,11 +98,12 @@
         handleEvent,
       );
       messages = newMessages;
+      hasMoreMessages = false;
+      isLoadingMoreMessages = false;
       lastPromptTokens = 0;
     } catch (e) {
       console.error('Auto-compress failed:', e);
-      // Reload messages to ensure consistent state
-      messages = await api.getMessages(conversationId);
+      await loadLatestMessages(conversationId);
     } finally {
       isCompressing = false;
     }
@@ -120,6 +134,38 @@
     }
   }
 
+  async function loadAssistants() {
+    try {
+      assistants = await api.listAssistants();
+      syncCurrentModelToAssistantBinding();
+    } catch (e) {
+      console.error('Failed to load assistants:', e);
+      assistants = [];
+    }
+  }
+
+  async function loadConversations() {
+    try {
+      conversations = await api.listConversations();
+    } catch (e) {
+      console.error('Failed to load conversations:', e);
+      conversations = [];
+    }
+  }
+
+  function syncCurrentModelToAssistantBinding(assistantId: string | null | undefined = currentConversation?.assistantId) {
+    const assistant = assistants.find((item) => item.id === assistantId);
+    if (assistant?.modelId) {
+      currentModelId = assistant.modelId;
+    }
+  }
+
+  async function refreshConversationState(conversationId: string) {
+    await loadConversations();
+    const conversation = conversations.find((item) => item.id === conversationId) ?? null;
+    syncCurrentModelToAssistantBinding(conversation?.assistantId);
+  }
+
   function handleUndoKeydown(e: KeyboardEvent) {
     if ((e.metaKey || e.ctrlKey) && e.key === 'z' && !e.shiftKey) {
       if (canRestore) {
@@ -131,6 +177,8 @@
 
   onMount(() => {
     loadModels();
+    loadAssistants();
+    loadConversations();
     loadAutoRenameSettings();
     window.addEventListener('keydown', handleUndoKeydown);
   });
@@ -142,19 +190,75 @@
   function handleConversationSelect(id: string) {
     invalidateRestore();
     activeConversationId = id;
-    loadMessages(id);
+    void refreshConversationState(id);
+    void loadLatestMessages(id);
   }
 
-  async function loadMessages(conversationId: string) {
+  async function handleAssistantSelect(assistantId: string | null) {
+    if (!activeConversationId || assistantSelectionLocked) return;
+
+    const currentAssistantId = currentConversation?.assistantId ?? null;
+    if (currentAssistantId === assistantId) return;
+
+    try {
+      await api.updateConversationAssistant(activeConversationId, assistantId);
+      conversations = conversations.map((conversation) =>
+        conversation.id === activeConversationId
+          ? { ...conversation, assistantId, updatedAt: new Date().toISOString() }
+          : conversation,
+      );
+      syncCurrentModelToAssistantBinding(assistantId);
+    } catch (e) {
+      console.error('Failed to update conversation assistant:', e);
+      await refreshConversationState(activeConversationId);
+    }
+  }
+
+  async function loadLatestMessages(conversationId: string) {
     if (!conversationId) {
       messages = [];
+      hasMoreMessages = false;
+      isLoadingMoreMessages = false;
       return;
     }
+
     try {
-      messages = await api.getMessages(conversationId);
+      const page = await api.getMessages(conversationId, { limit: pageSize });
+      messages = page.messages;
+      hasMoreMessages = page.hasMore;
+      isLoadingMoreMessages = false;
     } catch (e) {
       console.error('Failed to load messages:', e);
       messages = [];
+      hasMoreMessages = false;
+      isLoadingMoreMessages = false;
+    }
+  }
+
+  async function loadOlderMessages() {
+    if (
+      !activeConversationId ||
+      !messages.length ||
+      !hasMoreMessages ||
+      isLoadingMoreMessages ||
+      isStreaming ||
+      isCompressing
+    ) {
+      return;
+    }
+
+    isLoadingMoreMessages = true;
+    try {
+      const page = await api.getMessages(activeConversationId, {
+        limit: pageSize,
+        beforeMessageId: messages[0]?.id ?? null,
+      });
+      messages = [...page.messages, ...messages];
+      hasMoreMessages = page.hasMore;
+    } catch (e) {
+      console.error('Failed to load older messages:', e);
+    } finally {
+      isLoadingMoreMessages = false;
     }
   }
 
@@ -230,7 +334,7 @@
     try {
       await api.restoreMessage(idToRestore);
       deletedMessageIds = deletedMessageIds.slice(0, -1);
-      messages = await api.getMessages(activeConversationId);
+      await loadLatestMessages(activeConversationId);
     } catch (e) {
       console.error('Failed to restore message:', e);
     }
@@ -301,12 +405,21 @@
         params.providerParams,
       );
       // Reload messages from DB to sync IDs (optimistic user msg has frontend-generated ID)
-      messages = await api.getMessages(activeConversationId);
+      await loadLatestMessages(activeConversationId);
       // Trigger auto-rename based on message count
       void tryAutoRename(activeConversationId, messages.length);
     } catch (e) {
       console.error('Failed to send message:', e);
+      const idx = messages.findIndex((m) => m.id === assistantMsg.id || m.id === streamingMessageId);
+      if (idx !== -1) {
+        messages[idx] = {
+          ...messages[idx],
+          status: 'error',
+          content: messages[idx].content || String(e),
+        };
+      }
       isStreaming = false;
+      streamingMessageId = '';
     }
   }
 
@@ -331,7 +444,7 @@
     try {
       await api.deleteMessage(messageId);
       // Reload to reflect version changes (e.g. another version activated)
-      messages = await api.getMessages(activeConversationId);
+      await loadLatestMessages(activeConversationId);
     } catch (e) {
       console.error('Failed to delete message:', e);
       // Rollback UI on failure
@@ -502,7 +615,7 @@
       );
 
       // Reload to get the real message with proper IDs
-      messages = await api.getMessages(activeConversationId);
+      await loadLatestMessages(activeConversationId);
 
       // Generate subsequent versions using generateVersion
       for (let i = 1; i < versionModels.length; i++) {
@@ -550,12 +663,12 @@
           vParams.providerParams,
         );
 
-        messages = await api.getMessages(activeConversationId);
+        await loadLatestMessages(activeConversationId);
       }
     } catch (e) {
       console.error('Failed to resend all versions:', e);
       isStreaming = false;
-      messages = await api.getMessages(activeConversationId);
+      await loadLatestMessages(activeConversationId);
     }
   }
 
@@ -602,11 +715,11 @@
         params.providerParams,
       );
 
-      messages = await api.getMessages(activeConversationId);
+      await loadLatestMessages(activeConversationId);
     } catch (e) {
       console.error('Failed to regenerate:', e);
       isStreaming = false;
-      messages = await api.getMessages(activeConversationId);
+      await loadLatestMessages(activeConversationId);
     }
   }
 
@@ -663,11 +776,11 @@
         params.providerParams,
       );
 
-      messages = await api.getMessages(activeConversationId);
+      await loadLatestMessages(activeConversationId);
     } catch (e) {
       console.error('Failed to generate version:', e);
       isStreaming = false;
-      messages = await api.getMessages(activeConversationId);
+      await loadLatestMessages(activeConversationId);
     }
   }
 
@@ -675,7 +788,7 @@
     invalidateRestore();
     try {
       await api.switchVersion(versionGroupId, versionNumber);
-      messages = await api.getMessages(activeConversationId);
+      await loadLatestMessages(activeConversationId);
     } catch (e) {
       console.error('Failed to switch version:', e);
     }
@@ -714,8 +827,6 @@
 
 <SidebarProvider>
   <AppSidebar
-    {modelGroups}
-    bind:selectedModelId={currentModelId}
     bind:activeConversationId
     onConversationSelect={handleConversationSelect}
   />
@@ -726,8 +837,16 @@
         conversationId={activeConversationId}
         {messages}
         {modelGroups}
+        {assistants}
+        {selectedAssistantId}
+        {assistantSelectionLocked}
+        {hasMoreMessages}
+        {isLoadingMoreMessages}
+        canLoadOlderMessages={!isStreaming && !isCompressing}
         bind:selectedModelId={currentModelId}
         disabled={isStreaming || isCompressing}
+        onAssistantSelect={handleAssistantSelect}
+        onLoadOlderMessages={loadOlderMessages}
         onEvent={handleChatEvent}
       />
     {:else}

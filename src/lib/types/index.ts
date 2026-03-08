@@ -17,6 +17,16 @@ export interface Message {
   totalVersions: number;
 }
 
+export interface PagedMessages {
+  messages: Message[];
+  hasMore: boolean;
+}
+
+export interface GetMessagesOptions {
+  limit?: number;
+  beforeMessageId?: string | null;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -93,6 +103,8 @@ export type ProviderParams =
       keepAlive?: string | null;
     };
 
+export type AssistantExtraParams = ProviderParams | Record<string, never>;
+
 export interface ModelParams {
   common: CommonParams;
   providerParams: ProviderParams;
@@ -123,7 +135,7 @@ export interface Assistant {
   temperature: number | null;
   topP: number | null;
   maxTokens: number | null;
-  extraParams: Record<string, unknown>;
+  extraParams: AssistantExtraParams;
   sortOrder: number;
   createdAt: string;
 }

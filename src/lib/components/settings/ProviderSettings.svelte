@@ -5,12 +5,14 @@
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import { Slider } from '$lib/components/ui/slider';
+  import AssistantSettings from '$lib/components/settings/AssistantSettings.svelte';
   import { load as loadStore } from '@tauri-apps/plugin-store';
   import { getVersion } from '@tauri-apps/api/app';
   import { i18n, type Language } from '$lib/stores/i18n.svelte';
 
   type NavItemId =
     | 'modelService'
+    | 'assistants'
     | 'generalSettings'
     | 'displaySettings'
     | 'dataSettings'
@@ -32,6 +34,8 @@
     switch (item) {
       case 'modelService':
         return isEn ? 'Model Service' : '模型服务';
+      case 'assistants':
+        return isEn ? 'Assistant Settings' : '助手设置';
       case 'generalSettings':
         return isEn ? 'General Settings' : '常规设置';
       case 'displaySettings':
@@ -52,7 +56,7 @@
   }
 
   const sectionGroups = $derived.by((): SectionGroup[] => [
-    { title: navLabel('modelService'), items: ['modelService', 'generalSettings', 'displaySettings', 'dataSettings'] },
+    { title: navLabel('modelService'), items: ['modelService', 'assistants', 'generalSettings', 'displaySettings', 'dataSettings'] },
     { title: language === 'en' ? 'MCP Servers' : 'MCP 服务器', items: ['networkSearch', 'globalMemory', 'quickPhrases', 'shortcuts'] },
     { title: language === 'en' ? 'Other' : '其他', items: ['about'] },
   ]);
@@ -1148,6 +1152,10 @@
       </div>
     {/if}
   </section>
+  {:else if activeNav === 'assistants'}
+    <section class="assistants-panel">
+      <AssistantSettings />
+    </section>
   {:else if activeNav === 'generalSettings'}
     <section class="general-panel">
       <div class="detail-header">
@@ -1960,6 +1968,16 @@
     padding: 1.2rem 1.5rem;
     overflow-y: auto;
     min-height: 0;
+  }
+
+  .assistants-panel {
+    grid-column: 2 / -1;
+    padding: 1.2rem 1.5rem;
+    overflow: hidden;
+    min-height: 0;
+    min-width: 0;
+    height: 100%;
+    display: flex;
   }
 
   .general-switch-row {

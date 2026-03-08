@@ -70,6 +70,21 @@ pub fn run(conn: &Connection) -> AppResult<()> {
             is_active_version INTEGER NOT NULL DEFAULT 1
         );
 
+        CREATE TABLE IF NOT EXISTS paste_blobs (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            char_count INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS paste_blobs_fts USING fts5(
+            paste_id UNINDEXED,
+            message_id UNINDEXED,
+            content
+        );
+
         CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
             content,
             content=messages,

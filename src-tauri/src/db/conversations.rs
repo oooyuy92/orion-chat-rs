@@ -82,6 +82,21 @@ pub fn update_title(conn: &Connection, id: &str, title: &str) -> AppResult<()> {
     Ok(())
 }
 
+pub fn update_assistant(
+    conn: &Connection,
+    id: &str,
+    assistant_id: Option<&str>,
+) -> AppResult<()> {
+    let changed = conn.execute(
+        "UPDATE conversations SET assistant_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![assistant_id, id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::NotFound(format!("Conversation {id}")));
+    }
+    Ok(())
+}
+
 pub fn update_pin(conn: &Connection, id: &str, is_pinned: bool) -> AppResult<()> {
     let changed = conn.execute(
         "UPDATE conversations SET is_pinned = ?1 WHERE id = ?2",
@@ -144,6 +159,41 @@ mod tests {
             delete(conn, "conv-1")?;
             let all = list(conn)?;
             assert_eq!(all.len(), 0);
+
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_update_assistant_binding() {
+        let db = Database::new(":memory:").unwrap();
+
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO assistants (id, name, extra_params, created_at) VALUES (?1, ?2, '{}', ?3)",
+                rusqlite::params!["assistant-1", "Helper", "2025-01-01T00:00:00"],
+            )?;
+
+            let conv = Conversation {
+                id: "conv-1".into(),
+                title: "Hello".into(),
+                assistant_id: None,
+                model_id: None,
+                is_pinned: false,
+                sort_order: 0,
+                created_at: "2025-01-01T00:00:00".into(),
+                updated_at: "2025-01-01T00:00:00".into(),
+            };
+            create(conn, &conv)?;
+
+            update_assistant(conn, "conv-1", Some("assistant-1"))?;
+            let fetched = get(conn, "conv-1")?;
+            assert_eq!(fetched.assistant_id.as_deref(), Some("assistant-1"));
+
+            update_assistant(conn, "conv-1", None)?;
+            let fetched = get(conn, "conv-1")?;
+            assert_eq!(fetched.assistant_id, None);
 
             Ok(())
         })

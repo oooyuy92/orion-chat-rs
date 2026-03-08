@@ -2,6 +2,8 @@ import { invoke, Channel } from '@tauri-apps/api/core';
 import type {
   Conversation,
   Message,
+  PagedMessages,
+  GetMessagesOptions,
   ProviderConfig,
   ProviderType,
   ModelInfo,
@@ -45,13 +47,20 @@ export const api = {
   pinConversation(id: string, isPinned: boolean): Promise<void> {
     return invoke('pin_conversation', { id, isPinned });
   },
+  updateConversationAssistant(id: string, assistantId: string | null): Promise<void> {
+    return invoke('update_conversation_assistant', { id, assistantId });
+  },
   generateConversationTitle(conversationId: string, modelId: string): Promise<string> {
     return invoke('generate_conversation_title', { conversationId, modelId });
   },
 
   // Messages
-  getMessages(conversationId: string): Promise<Message[]> {
-    return invoke('get_messages', { conversationId });
+  getMessages(conversationId: string, options: GetMessagesOptions = {}): Promise<PagedMessages> {
+    return invoke('get_messages', {
+      conversationId,
+      limit: options.limit ?? null,
+      beforeMessageId: options.beforeMessageId ?? null,
+    });
   },
   sendMessage(conversationId: string, content: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
     const channel = new Channel<ChatEvent>();
@@ -85,6 +94,15 @@ export const api = {
   },
   updateMessageContent(id: string, content: string): Promise<void> {
     return invoke('update_message_content', { id, content });
+  },
+  getPasteBlobContent(pasteId: string): Promise<string> {
+    return invoke('get_paste_blob_content', { pasteId });
+  },
+  hydratePasteContent(content: string): Promise<string> {
+    return invoke('hydrate_paste_content', { content });
+  },
+  expandPasteContent(content: string): Promise<string> {
+    return invoke('expand_paste_content', { content });
   },
 
   // Versions

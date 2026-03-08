@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{watch, Mutex};
@@ -14,6 +15,7 @@ use crate::providers::Provider;
 
 pub struct AppState {
     pub db: Database,
+    pub data_dir: PathBuf,
     pub providers: Mutex<HashMap<String, Arc<dyn Provider>>>,
     pub cancel_sender: watch::Sender<bool>,
     pub cancel_receiver: watch::Receiver<bool>,
@@ -22,11 +24,13 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(db_path: &str) -> AppResult<Self> {
+    pub fn new(db_path: &str, data_dir: impl Into<PathBuf>) -> AppResult<Self> {
         let db = Database::new(db_path)?;
+        let data_dir = data_dir.into();
         let (cancel_sender, cancel_receiver) = watch::channel(false);
         Ok(Self {
             db,
+            data_dir,
             providers: Mutex::new(HashMap::new()),
             cancel_sender,
             cancel_receiver,

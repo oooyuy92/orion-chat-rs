@@ -2,6 +2,7 @@ pub mod commands;
 pub mod db;
 pub mod error;
 pub mod models;
+pub mod paste_storage;
 pub mod providers;
 pub mod state;
 
@@ -20,7 +21,7 @@ pub fn run() {
     let db_path_str = db_path.to_str().expect("Invalid db path");
 
     let app_state = Arc::new(
-        state::AppState::new(db_path_str).expect("Failed to initialize AppState"),
+        state::AppState::new(db_path_str, data_dir.clone()).expect("Failed to initialize AppState"),
     );
 
     // Re-register providers from DB
@@ -85,6 +86,7 @@ pub fn run() {
             commands::conversation::update_conversation_title,
             commands::conversation::delete_conversation,
             commands::conversation::pin_conversation,
+            commands::conversation::update_conversation_assistant,
             commands::conversation::generate_conversation_title,
             commands::conversation::get_messages,
             commands::conversation::delete_message,
@@ -92,6 +94,9 @@ pub fn run() {
             commands::conversation::delete_messages_after,
             commands::conversation::delete_messages_from,
             commands::conversation::update_message_content,
+            commands::conversation::hydrate_paste_content,
+            commands::conversation::expand_paste_content,
+            commands::conversation::get_paste_blob_content,
             commands::conversation::switch_version,
             commands::conversation::list_versions,
             commands::conversation::get_version_models,

@@ -6,6 +6,7 @@ use tauri::State;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
+use crate::paste_storage;
 use crate::providers::Provider;
 use crate::state::AppState;
 
@@ -73,28 +74,86 @@ fn default_provider_params(provider_type: &str) -> ProviderParams {
     }
 }
 
-/// Strip paste-ref markers, keeping only the inner text.
 fn strip_paste_markers(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut remaining = text;
-    while let Some(start) = remaining.find("<<paste:") {
-        result.push_str(&remaining[..start]);
-        if let Some(marker_end) = remaining[start..].find(">>") {
-            let after_marker = start + marker_end + 2;
-            if let Some(close_pos) = remaining[after_marker..].find("<</paste>>") {
-                result.push_str(&remaining[after_marker..after_marker + close_pos]);
-                remaining = &remaining[(after_marker + close_pos + 10)..];
-            } else {
-                result.push_str(&remaining[start..]);
-                remaining = "";
-            }
-        } else {
-            result.push_str(&remaining[start..]);
-            remaining = "";
-        }
+    paste_storage::expand_legacy_inline_pastes(text)
+}
+
+fn resolve_paste_blob_path(state: &AppState, paste_id: &str) -> AppResult<String> {
+    state.db.with_conn(|conn| Ok(db::paste_blobs::get(conn, paste_id)?.file_path))
+}
+
+fn expand_content_for_model(state: &AppState, text: &str) -> AppResult<String> {
+    let legacy_expanded = strip_paste_markers(text);
+    paste_storage::expand_paste_refs_to_plain_text(&state.data_dir, &legacy_expanded, &|paste_id| {
+        resolve_paste_blob_path(state, paste_id)
+    })
+}
+
+fn persist_external_pastes(
+    state: &AppState,
+    conversation_id: &str,
+    message_id: &str,
+    content: &str,
+    created_at: &str,
+) -> AppResult<String> {
+    paste_storage::externalize_legacy_inline_pastes(content, |text, _count| {
+        let paste_id = uuid::Uuid::new_v4().to_string();
+        let persisted = paste_storage::persist_paste_blob(&state.data_dir, &paste_id, text)?;
+        state.db.with_conn(|conn| {
+            db::paste_blobs::create(
+                conn,
+                &paste_id,
+                conversation_id,
+                message_id,
+                persisted.char_count,
+                &persisted.file_path,
+                text,
+                created_at,
+            )
+        })?;
+        Ok(format!("<<paste-ref:{paste_id}:{}>>", persisted.char_count))
+    })
+}
+
+fn build_request_messages(
+    history: &[Message],
+    assistant_prompt: Option<&str>,
+) -> Vec<ChatMessage> {
+    let mut messages = Vec::new();
+
+    if let Some(prompt) = assistant_prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        messages.push(ChatMessage {
+            role: Role::System,
+            content: prompt.to_string(),
+        });
     }
-    result.push_str(remaining);
-    result
+
+    messages.extend(
+        history
+            .iter()
+            .filter(|m| m.status != MessageStatus::Error && m.status != MessageStatus::Streaming)
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            }),
+    );
+
+    messages
+}
+
+fn load_assistant_system_prompt(
+    state: &AppState,
+    conversation_id: &str,
+) -> AppResult<Option<String>> {
+    state.db.with_conn(|conn| {
+        let conversation = db::conversations::get(conn, conversation_id)?;
+        let Some(assistant_id) = conversation.assistant_id else {
+            return Ok(None);
+        };
+
+        let assistant = db::assistants::get(conn, &assistant_id)?;
+        Ok(assistant.system_prompt)
+    })
 }
 
 /// Core streaming logic: send events, stream, persist result.
@@ -111,14 +170,16 @@ async fn run_stream(
     common_params: Option<CommonParams>,
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
-    let messages: Vec<ChatMessage> = history
+    let assistant_prompt = load_assistant_system_prompt(state, conversation_id)?;
+    let expanded_history = history
         .iter()
-        .filter(|m| m.status != MessageStatus::Error && m.status != MessageStatus::Streaming)
-        .map(|m| ChatMessage {
-            role: m.role.clone(),
-            content: strip_paste_markers(&m.content),
+        .map(|message| -> AppResult<Message> {
+            let mut cloned = message.clone();
+            cloned.content = expand_content_for_model(state, &message.content)?;
+            Ok(cloned)
         })
-        .collect();
+        .collect::<AppResult<Vec<_>>>()?;
+    let messages = build_request_messages(&expanded_history, assistant_prompt.as_deref());
 
     let mut common = common_params.unwrap_or(CommonParams {
         temperature: None,
@@ -256,16 +317,17 @@ pub async fn send_message(
 
     let now = chrono_now();
 
+    let user_message_id = uuid::Uuid::new_v4().to_string();
     let user_msg = Message {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: user_message_id.clone(),
         conversation_id: conversation_id.clone(),
         role: Role::User,
-        content,
+        content: content.clone(),
         reasoning: None,
         model_id: None,
         status: MessageStatus::Done,
         token_count: None,
-        created_at: now,
+        created_at: now.clone(),
         version_group_id: None,
         version_number: 1,
         total_versions: 1,
@@ -273,6 +335,13 @@ pub async fn send_message(
     state
         .db
         .with_conn(|conn| db::messages::create(conn, &user_msg))?;
+
+    let persisted_content = persist_external_pastes(&state, &conversation_id, &user_message_id, &content, &now)?;
+    if persisted_content != content {
+        state
+            .db
+            .with_conn(|conn| db::messages::update_text(conn, &user_message_id, &persisted_content))?;
+    }
 
     do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &channel, common_params, provider_params).await
 }
@@ -477,7 +546,7 @@ pub async fn compress_conversation(
         if msg.status != MessageStatus::Error {
             chat_messages.push(ChatMessage {
                 role: msg.role.clone(),
-                content: strip_paste_markers(&msg.content),
+                content: expand_content_for_model(&state, &msg.content)?,
             });
         }
     }
@@ -613,4 +682,74 @@ pub(crate) fn chrono_now() -> String {
 
 fn is_leap(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_message(role: Role, content: &str, status: MessageStatus) -> Message {
+        Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            conversation_id: "conv-1".into(),
+            role,
+            content: content.into(),
+            reasoning: None,
+            model_id: None,
+            status,
+            token_count: None,
+            created_at: "2025-01-01T00:00:00".into(),
+            version_group_id: None,
+            version_number: 1,
+            total_versions: 1,
+        }
+    }
+
+    #[test]
+    fn test_build_request_messages_prepends_assistant_prompt() {
+        let history = vec![
+            make_message(Role::User, "hi", MessageStatus::Done),
+            make_message(Role::Assistant, "hello", MessageStatus::Done),
+        ];
+
+        let messages = build_request_messages(&history, Some("You are a coding assistant."));
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].content, "You are a coding assistant.");
+        assert_eq!(messages[1].role, Role::User);
+    }
+
+    #[test]
+    fn test_build_request_messages_skips_blank_prompt_and_invalid_status() {
+        let history = vec![
+            make_message(Role::User, "hi", MessageStatus::Done),
+            make_message(Role::Assistant, "streaming", MessageStatus::Streaming),
+            make_message(Role::Assistant, "oops", MessageStatus::Error),
+        ];
+
+        let messages = build_request_messages(&history, Some("   "));
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[0].content, "hi");
+    }
+
+    #[test]
+    fn test_build_request_messages_keeps_summary_after_assistant_prompt() {
+        let history = vec![
+            make_message(Role::Assistant, "summary: we discussed refactoring", MessageStatus::Done),
+            make_message(Role::User, "continue from that plan", MessageStatus::Done),
+        ];
+
+        let messages = build_request_messages(&history, Some("You are Orion assistant."));
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].content, "You are Orion assistant.");
+        assert_eq!(messages[1].role, Role::Assistant);
+        assert_eq!(messages[1].content, "summary: we discussed refactoring");
+        assert_eq!(messages[2].role, Role::User);
+        assert_eq!(messages[2].content, "continue from that plan");
+    }
 }

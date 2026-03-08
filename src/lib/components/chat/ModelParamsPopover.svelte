@@ -1,7 +1,6 @@
 <script lang="ts">
   import type {
     ProviderType,
-    ModelParams,
     CommonParams,
     ProviderParams,
     AnthropicThinking,
@@ -9,7 +8,13 @@
     ReasoningEffort,
     GeminiThinkingLevel,
   } from '$lib/types';
-  import { getModelParams, setModelParams, deleteModelParams } from '$lib/stores/modelParams';
+  import {
+    alignProviderParams,
+    defaultProviderParams,
+    getModelParams,
+    setModelParams,
+    deleteModelParams,
+  } from '$lib/stores/modelParams';
   import { Popover, PopoverContent, PopoverTrigger } from '$lib/components/ui/popover';
   import { Slider } from '$lib/components/ui/slider';
   import { Input } from '$lib/components/ui/input';
@@ -36,12 +41,22 @@
   $effect(() => {
     if (modelId && providerType) {
       loaded = false;
+      common = {};
+      providerParams = defaultProviderParams(providerType);
+      let cancelled = false;
       getModelParams(modelId, providerType).then((p) => {
+        if (cancelled) return;
         common = p.common;
-        providerParams = p.providerParams;
+        providerParams = alignProviderParams(providerType, p.providerParams);
         loaded = true;
       });
+      return () => {
+        cancelled = true;
+      };
     }
+    common = {};
+    providerParams = { provider_type: 'openaiCompat' };
+    loaded = false;
   });
 
   function save() {
@@ -52,13 +67,7 @@
   async function reset() {
     await deleteModelParams(modelId);
     common = {};
-    const tag = providerTypeTag();
-    switch (tag) {
-      case 'anthropic': providerParams = { provider_type: 'anthropic' }; break;
-      case 'gemini': providerParams = { provider_type: 'gemini' }; break;
-      case 'ollama': providerParams = { provider_type: 'ollama' }; break;
-      default: providerParams = { provider_type: 'openaiCompat' }; break;
-    }
+    providerParams = defaultProviderParams(providerType);
   }
 
   function providerTypeTag(): ProviderParams['provider_type'] {

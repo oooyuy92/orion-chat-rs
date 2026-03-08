@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Message } from '$lib/types';
   import { renderMarkdown } from '$lib/utils/markdown';
+  import { api } from '$lib/utils/invoke';
   import PencilIcon from '@lucide/svelte/icons/pencil';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
   import CopyIcon from '@lucide/svelte/icons/copy';
@@ -29,36 +30,80 @@
   const isLoading = $derived(
     !isUser && message.status === 'streaming' && !message.content && !message.reasoning,
   );
+  const isStreamingAssistant = $derived(message.role === 'assistant' && message.status === 'streaming');
   const markdownContent = $derived(
-    message.role === 'assistant' ? renderMarkdown(message.content) : message.content,
+    message.role === 'assistant' && message.status !== 'streaming'
+      ? renderMarkdown(message.content)
+      : message.content,
   );
-  const renderedReasoning = $derived(message.reasoning ? renderMarkdown(message.reasoning) : '');
+  const renderedReasoning = $derived(
+    message.reasoning && message.status !== 'streaming' ? renderMarkdown(message.reasoning) : (message.reasoning ?? ''),
+  );
   const showActions = $derived(isUser && !disabled && (message.status === 'done' || message.status === 'error'));
   const showAssistantActions = $derived(!isUser && !disabled && (message.status === 'done' || message.status === 'error'));
 
-  // Parse user message for paste-ref markers: <<paste:LENGTH>>...text...<</paste>>
-  const PASTE_RE = /<<paste:(\d+)>>([\s\S]*?)<\/paste>>/g;
-  const hasPasteRef = $derived(isUser && PASTE_RE.test(message.content));
+  type TextSegment = { type: 'text'; value: string };
+  type InlinePasteSegment = { type: 'paste'; length: number; value: string };
+  type ExternalPasteSegment = { type: 'paste-ref'; length: number; pasteId: string };
+  type ContentSegment = TextSegment | InlinePasteSegment | ExternalPasteSegment;
 
-  type ContentSegment = { type: 'text'; value: string } | { type: 'paste'; length: number; value: string };
   const userContentSegments = $derived.by((): ContentSegment[] => {
     if (!isUser) return [];
-    PASTE_RE.lastIndex = 0;
+
     const segments: ContentSegment[] = [];
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = PASTE_RE.exec(message.content)) !== null) {
-      if (match.index > lastIndex) {
-        segments.push({ type: 'text', value: message.content.slice(lastIndex, match.index) });
+    let cursor = 0;
+    const content = message.content;
+
+    while (cursor < content.length) {
+      const inlineStart = content.indexOf('<<paste:', cursor);
+      const refStart = content.indexOf('<<paste-ref:', cursor);
+      const candidates = [inlineStart, refStart].filter((index) => index !== -1);
+      const nextStart = candidates.length ? Math.min(...candidates) : -1;
+
+      if (nextStart === -1) {
+        segments.push({ type: 'text', value: content.slice(cursor) });
+        break;
       }
-      segments.push({ type: 'paste', length: parseInt(match[1]), value: match[2] });
-      lastIndex = match.index + match[0].length;
+
+      if (nextStart > cursor) {
+        segments.push({ type: 'text', value: content.slice(cursor, nextStart) });
+      }
+
+      if (nextStart === inlineStart) {
+        const markerEnd = content.indexOf('>>', inlineStart);
+        const closePos = markerEnd === -1 ? -1 : content.indexOf('<</paste>>', markerEnd + 2);
+        if (markerEnd === -1 || closePos === -1) {
+          segments.push({ type: 'text', value: content.slice(nextStart) });
+          break;
+        }
+        const length = parseInt(content.slice(inlineStart + 8, markerEnd), 10) || 0;
+        const value = content.slice(markerEnd + 2, closePos);
+        segments.push({ type: 'paste', length, value });
+        cursor = closePos + 10;
+      } else {
+        const markerEnd = content.indexOf('>>', refStart);
+        if (markerEnd === -1) {
+          segments.push({ type: 'text', value: content.slice(nextStart) });
+          break;
+        }
+        const marker = content.slice(refStart + 12, markerEnd);
+        const splitIndex = marker.lastIndexOf(':');
+        if (splitIndex === -1) {
+          segments.push({ type: 'text', value: content.slice(nextStart, markerEnd + 2) });
+          cursor = markerEnd + 2;
+          continue;
+        }
+        const pasteId = marker.slice(0, splitIndex);
+        const length = parseInt(marker.slice(splitIndex + 1), 10) || 0;
+        segments.push({ type: 'paste-ref', length, pasteId });
+        cursor = markerEnd + 2;
+      }
     }
-    if (lastIndex < message.content.length) {
-      segments.push({ type: 'text', value: message.content.slice(lastIndex) });
-    }
-    return segments;
+
+    return segments.filter((segment) => !(segment.type === 'text' && !segment.value));
   });
+
+  const hasPasteRef = $derived(isUser && userContentSegments.some((segment) => segment.type !== 'text'));
 
   const PASTE_THRESHOLD = 500;
 
@@ -71,27 +116,33 @@
   let isHovered = $state(false);
   const editPastedBlocks = new Map<string, string>();
 
-  // Reset resending state when streaming ends (disabled goes back to false)
   $effect(() => {
     if (!disabled && isResending) {
       isResending = false;
     }
   });
 
-
-  function startEdit() {
+  async function startEdit() {
     isEditing = true;
     editPastedBlocks.clear();
+    let editableContent = message.content;
+    if (editableContent.includes('<<paste-ref:')) {
+      try {
+        editableContent = await api.hydratePasteContent(editableContent);
+      } catch (e) {
+        console.error('Failed to hydrate paste content for edit:', e);
+      }
+    }
     requestAnimationFrame(() => {
       if (!editEditorEl) return;
-      populateEditor(editEditorEl, message.content);
+      populateEditor(editEditorEl, editableContent);
       editEditorEl.focus();
     });
   }
 
   function populateEditor(el: HTMLDivElement, content: string) {
     el.innerHTML = '';
-    const re = /<<paste:(\d+)>>([\s\S]*?)<\/paste>>/g;
+    const re = /<<paste:(\d+)>>([\s\S]*?)<<\/paste>>/g;
     let lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = re.exec(content)) !== null) {
@@ -213,9 +264,27 @@
     onAction?.({ type: 'delete', messageId: message.id });
   }
 
+  async function openPaste(segment: InlinePasteSegment | ExternalPasteSegment) {
+    if (segment.type === 'paste') {
+      viewingPasteText = segment.value;
+      return;
+    }
+
+    viewingPasteText = i18n.t.loading;
+    try {
+      viewingPasteText = await api.getPasteBlobContent(segment.pasteId);
+    } catch (e) {
+      console.error('Failed to load paste blob content:', e);
+      viewingPasteText = '';
+    }
+  }
+
   async function copyToClipboard() {
     try {
-      await navigator.clipboard.writeText(message.content);
+      const content = message.content.includes('<<paste-ref:')
+        ? await api.expandPasteContent(message.content)
+        : message.content;
+      await navigator.clipboard.writeText(content);
       copied = true;
       setTimeout(() => (copied = false), 1500);
     } catch (e) {
@@ -225,7 +294,6 @@
 </script>
 
 {#if isUser}
-  <!-- 用户消息：右对齐气泡，浅灰背景 -->
   <div
     class="flex w-full max-w-[95%] ml-auto justify-end"
     role="presentation"
@@ -234,7 +302,6 @@
   >
     <div class="flex w-fit max-w-full flex-col gap-1">
       {#if isEditing}
-        <!-- Edit mode -->
         <div class="flex flex-col gap-2 w-full min-w-[300px]">
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
@@ -262,7 +329,6 @@
           </div>
         </div>
       {:else}
-        <!-- Normal mode -->
         {#if hasPasteRef}
           <div class="rounded-lg bg-secondary px-4 py-3 text-sm text-foreground">
             {#each userContentSegments as seg}
@@ -271,7 +337,7 @@
               {:else}
                 <button
                   class="paste-tag"
-                  onclick={() => (viewingPasteText = seg.value)}
+                  onclick={() => void openPaste(seg)}
                 >
                   {i18n.pasteLabel(seg.length)}
                 </button>
@@ -288,7 +354,6 @@
           <div class="text-xs text-destructive px-1">{i18n.t.messageGenerationFailed}</div>
         {/if}
 
-        <!-- Action buttons -->
         {#if isResending}
           <div class="flex justify-end">
             <span class="rounded p-1 text-muted-foreground">
@@ -303,7 +368,7 @@
             <button
               class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
               title={i18n.t.edit}
-              onclick={startEdit}
+              onclick={() => void startEdit()}
             >
               <PencilIcon size={14} />
             </button>
@@ -317,7 +382,7 @@
             <button
               class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
               title={copied ? i18n.t.copied : i18n.t.copy}
-              onclick={copyToClipboard}
+              onclick={() => void copyToClipboard()}
             >
               {#if copied}
                 <CheckIcon size={14} class="text-green-500" />
@@ -338,7 +403,6 @@
     </div>
   </div>
 {:else}
-  <!-- 助手消息：左对齐纯文本，无背景 -->
   <div
     class="flex w-full max-w-[95%]"
     role="presentation"
@@ -346,7 +410,6 @@
     onmouseleave={() => (isHovered = false)}
   >
     <div class="flex w-fit max-w-full flex-col gap-2">
-      <!-- Version tabs -->
       {#if message.totalVersions > 1}
         <div class="flex items-center gap-1 flex-wrap">
           {#each Array.from({ length: message.totalVersions }, (_, i) => i + 1) as v}
@@ -380,14 +443,22 @@
 
         {#if showReasoning}
           <div class="rounded-xl border border-border bg-muted px-3 py-2.5 text-xs text-muted-foreground">
-            <div class="reasoning-markdown">{@html renderedReasoning}</div>
+            {#if isStreamingAssistant}
+              <div class="reasoning-plain">{renderedReasoning}</div>
+            {:else}
+              <div class="reasoning-markdown">{@html renderedReasoning}</div>
+            {/if}
           </div>
         {/if}
       {/if}
 
       {#if message.content}
         <div class="text-sm text-foreground">
-          <div class="message-markdown">{@html markdownContent}</div>
+          {#if isStreamingAssistant}
+            <div class="message-plain">{markdownContent}</div>
+          {:else}
+            <div class="message-markdown">{@html markdownContent}</div>
+          {/if}
         </div>
       {/if}
 
@@ -395,7 +466,6 @@
         <div class="text-xs text-destructive px-1">{i18n.t.messageGenerationFailed}</div>
       {/if}
 
-      <!-- Assistant action buttons -->
       {#if isResending}
         <div class="flex justify-start">
           <span class="rounded p-1 text-muted-foreground">
@@ -424,7 +494,7 @@
           <button
             class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
             title={copied ? i18n.t.copied : i18n.t.copy}
-            onclick={copyToClipboard}
+            onclick={() => void copyToClipboard()}
           >
             {#if copied}
               <CheckIcon size={14} class="text-green-500" />
@@ -448,7 +518,6 @@
 {#if viewingPasteText}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="content-overlay" onclick={() => (viewingPasteText = '')} onkeydown={(e) => { if (e.key === 'Escape') viewingPasteText = ''; }}>
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="content-modal" role="presentation" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
       <div class="content-body">{viewingPasteText}</div>
     </div>
@@ -559,6 +628,20 @@
 
   :global(.reasoning-markdown p:last-child) {
     margin-bottom: 0;
+  }
+
+  .message-plain,
+  .reasoning-plain {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .message-plain {
+    line-height: 1.6;
+  }
+
+  .reasoning-plain {
+    line-height: 1.5;
   }
 
   .paste-tag {
