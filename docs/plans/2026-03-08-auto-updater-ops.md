@@ -17,7 +17,7 @@
    - `src-tauri/Cargo.toml`
    - `src-tauri/tauri.conf.json`
    - `package.json`
-2. Create and push tag like `v0.3.0`
+2. Create and push tag like `v0.3.1`
 3. Ensure GitHub Actions release workflow finishes successfully
 4. Confirm release contains updater metadata and platform assets
 5. Verify an older client can detect the new version

@@ -18,12 +18,12 @@ const releaseWorkflow = readFileSync(
 
 const permissions = defaultCapability.permissions ?? [];
 
-test('rust crate version is aligned to 0.3.0', () => {
-  assert.match(cargoToml, /^version = "0\.3\.0"$/m);
+test('rust crate version is aligned to 0.3.1', () => {
+  assert.match(cargoToml, /^version = "0\.3\.1"$/m);
 });
 
-test('tauri app version is aligned to 0.3.0', () => {
-  assert.equal(tauriConfig.version, '0.3.0');
+test('tauri app version is aligned to 0.3.1', () => {
+  assert.equal(tauriConfig.version, '0.3.1');
 });
 
 test('rust dependencies include updater and process plugins', () => {
@@ -48,6 +48,10 @@ test('tauri updater config includes public key and github endpoint', () => {
   assert.deepEqual(updater.endpoints, [
     'https://github.com/oooyuy92/orion-chat-rs/releases/latest/download/latest.json',
   ]);
+});
+
+test('tauri bundle config enables updater artifacts generation', () => {
+  assert.equal(tauriConfig.bundle?.createUpdaterArtifacts, true);
 });
 
 test('release workflow generates updater metadata and reads signing secrets', () => {
