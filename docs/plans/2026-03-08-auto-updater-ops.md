@@ -5,6 +5,9 @@
 - `TAURI_SIGNING_PRIVATE_KEY`
   - The updater signing private key content.
   - Generated with `pnpm tauri signer generate`.
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+  - The password for the encrypted updater signing private key.
+  - Required when the generated minisign key is encrypted.
 
 ## Public Key
 

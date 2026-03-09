@@ -57,4 +57,5 @@ test('tauri bundle config enables updater artifacts generation', () => {
 test('release workflow generates updater metadata and reads signing secrets', () => {
   assert.match(releaseWorkflow, /includeUpdaterJson:\s*true/);
   assert.match(releaseWorkflow, /TAURI_SIGNING_PRIVATE_KEY/);
+  assert.match(releaseWorkflow, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD/);
 });
