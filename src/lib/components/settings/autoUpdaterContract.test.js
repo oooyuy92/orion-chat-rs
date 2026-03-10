@@ -3,6 +3,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+const packageJson = JSON.parse(
+  readFileSync(new URL('../../../../package.json', import.meta.url), 'utf8'),
+);
+const expectedVersion = packageJson.version;
 const cargoToml = readFileSync(new URL('../../../../src-tauri/Cargo.toml', import.meta.url), 'utf8');
 const tauriConfig = JSON.parse(
   readFileSync(new URL('../../../../src-tauri/tauri.conf.json', import.meta.url), 'utf8'),
@@ -18,12 +22,12 @@ const releaseWorkflow = readFileSync(
 
 const permissions = defaultCapability.permissions ?? [];
 
-test('rust crate version is aligned to 0.3.1', () => {
-  assert.match(cargoToml, /^version = "0\.3\.1"$/m);
+test(`rust crate version is aligned to ${expectedVersion}`, () => {
+  assert.match(cargoToml, new RegExp(`^version = "${expectedVersion.replace(/\./g, '\\.')}"$`, 'm'));
 });
 
-test('tauri app version is aligned to 0.3.1', () => {
-  assert.equal(tauriConfig.version, '0.3.1');
+test(`tauri app version is aligned to ${expectedVersion}`, () => {
+  assert.equal(tauriConfig.version, expectedVersion);
 });
 
 test('rust dependencies include updater and process plugins', () => {
