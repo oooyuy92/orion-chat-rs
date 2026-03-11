@@ -1,6 +1,6 @@
 [package]
 name = "orion-chat-rs"
-version = "0.3.3"
+version = "0.3.4"
 description = "Orion Chat - A Tauri v2 desktop chat application"
 authors = ["you"]
 edition = "2021"
