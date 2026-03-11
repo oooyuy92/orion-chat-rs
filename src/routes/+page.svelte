@@ -5,7 +5,7 @@
   import AppSidebar from '$lib/components/sidebar/AppSidebar.svelte';
   import ChatArea from '$lib/components/chat/ChatArea.svelte';
   import { api } from '$lib/utils/invoke';
-  import { titleUpdates } from '$lib/stores/conversations';
+  import { titleUpdates, assistantUpdates } from '$lib/stores/conversations';
   import { getModelParams } from '$lib/stores/modelParams';
   import type { ChatEvent } from '$lib/utils/invoke';
   import type { Assistant, Conversation, Message, ModelGroup, ProviderType } from '$lib/types';
@@ -250,6 +250,7 @@ function handleConversationSelect(selection: ConversationSelection) {
           ? { ...conversation, assistantId, updatedAt: new Date().toISOString() }
           : conversation,
       );
+      assistantUpdates.set({ id: activeConversationId, assistantId });
       syncCurrentModelToAssistantBinding(assistantId);
     } catch (e) {
       console.error('Failed to update conversation assistant:', e);

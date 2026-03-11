@@ -5,7 +5,7 @@
   import { api } from '$lib/utils/invoke';
   import { groupConversationsByTime } from '$lib/utils/date';
   import { i18n, type ConversationGroupKey } from '$lib/stores/i18n.svelte';
-  import { titleUpdates } from '$lib/stores/conversations';
+  import { titleUpdates, assistantUpdates } from '$lib/stores/conversations';
   import {
     SidebarGroup,
     SidebarGroupLabel,
@@ -56,6 +56,16 @@
       if (searchQuery.trim()) {
         void runSearch(searchQuery.trim());
       }
+    });
+    return unsub;
+  });
+
+  $effect(() => {
+    const unsub = assistantUpdates.subscribe((upd) => {
+      if (!upd) return;
+      conversations = conversations.map((c) =>
+        c.id === upd.id ? { ...c, assistantId: upd.assistantId } : c,
+      );
     });
     return unsub;
   });
