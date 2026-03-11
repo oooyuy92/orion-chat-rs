@@ -8,6 +8,7 @@
   import CheckIcon from '@lucide/svelte/icons/check';
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
   import MessageSquarePlusIcon from '@lucide/svelte/icons/message-square-plus';
+  import Columns2Icon from '@lucide/svelte/icons/columns-2';
   import { i18n } from '$lib/stores/i18n.svelte';
 
   type MessageAction =
@@ -16,7 +17,8 @@
     | { type: 'editResend'; messageId: string; content: string }
     | { type: 'regenerate'; messageId: string; modelId: string | null }
     | { type: 'generateVersion'; messageId: string }
-    | { type: 'switchVersion'; versionGroupId: string; versionNumber: number };
+    | { type: 'switchVersion'; versionGroupId: string; versionNumber: number }
+    | { type: 'expandVersions'; versionGroupId: string };
 
   type Props = {
     message: Message;
@@ -414,14 +416,25 @@
         <div class="flex items-center gap-1 flex-wrap">
           {#each Array.from({ length: message.totalVersions }, (_, i) => i + 1) as v}
             <button
-              class="rounded px-2 py-0.5 text-xs cursor-pointer {v === message.versionNumber
+              class="inline-flex items-center gap-0.5 rounded px-2 py-0.5 text-xs cursor-pointer {v === message.versionNumber
                 ? 'bg-foreground text-background font-medium'
                 : 'text-muted-foreground hover:bg-muted hover:text-foreground'}"
               onclick={() => switchVersion(v)}
             >
               v{v}
+              {#if v === message.versionNumber}
+                <CheckIcon size={12} />
+              {/if}
             </button>
           {/each}
+          <span class="mx-0.5 text-border">|</span>
+          <button
+            class="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+            title={i18n.t.compareVersions}
+            onclick={() => onAction?.({ type: 'expandVersions', versionGroupId: message.versionGroupId || message.id })}
+          >
+            <Columns2Icon size={14} />
+          </button>
         </div>
       {/if}
 

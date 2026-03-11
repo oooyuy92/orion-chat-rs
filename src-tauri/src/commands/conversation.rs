@@ -5,7 +5,7 @@ use tauri::State;
 
 use crate::db;
 use crate::error::{AppError, AppResult};
-use crate::models::{Conversation, MessageStatus, PagedMessages, Role};
+use crate::models::{Conversation, Message, MessageStatus, PagedMessages, Role};
 use crate::paste_storage;
 
 /// Lightweight version info for version tabs.
@@ -451,6 +451,16 @@ pub async fn list_versions(
             id: m.id,
         })
         .collect())
+}
+
+#[tauri::command]
+pub async fn list_version_messages(
+    state: State<'_, Arc<AppState>>,
+    version_group_id: String,
+) -> AppResult<Vec<Message>> {
+    state
+        .db
+        .with_conn(|conn| db::messages::list_versions(conn, &version_group_id))
 }
 
 #[tauri::command]

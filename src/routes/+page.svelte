@@ -40,6 +40,7 @@
   // Soft-delete restore state
   let deletedMessageIds = $state<string[]>([]);
   let canRestore = $derived(deletedMessageIds.length > 0);
+  let groupStreamingMessages = $state<Message[]>([]);
 
   // Auto-rename settings (read from store)
   let autoRename = $state(false);
@@ -312,7 +313,7 @@ function handleConversationSelect(selection: ConversationSelection) {
         streamingMessageId = event.messageId;
         break;
       case 'delta': {
-        const idx = messages.findIndex((m) => m.id === streamingMessageId);
+        const idx = messages.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
           messages[idx] = {
             ...messages[idx],
@@ -322,7 +323,7 @@ function handleConversationSelect(selection: ConversationSelection) {
         break;
       }
       case 'reasoning': {
-        const idx = messages.findIndex((m) => m.id === streamingMessageId);
+        const idx = messages.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
           messages[idx] = {
             ...messages[idx],
@@ -332,7 +333,7 @@ function handleConversationSelect(selection: ConversationSelection) {
         break;
       }
       case 'usage': {
-        const idx = messages.findIndex((m) => m.id === streamingMessageId);
+        const idx = messages.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
           messages[idx] = {
             ...messages[idx],
@@ -343,7 +344,7 @@ function handleConversationSelect(selection: ConversationSelection) {
         break;
       }
       case 'finished': {
-        const idx = messages.findIndex((m) => m.id === streamingMessageId);
+        const idx = messages.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
           messages[idx] = { ...messages[idx], status: 'done' };
         }
@@ -357,7 +358,7 @@ function handleConversationSelect(selection: ConversationSelection) {
       }
       case 'error': {
         console.error('Stream error:', event.message);
-        const idx = messages.findIndex((m) => m.id === streamingMessageId);
+        const idx = messages.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
           messages[idx] = {
             ...messages[idx],
@@ -838,11 +839,158 @@ function handleConversationSelect(selection: ConversationSelection) {
     }
   }
 
+  async function handleGroupSend(content: string, modelIds: string[]) {
+    invalidateRestore();
+    if (!activeConversationId) return;
+
+    // Optimistic user message
+    const userMsg: Message = {
+      id: crypto.randomUUID(),
+      conversationId: activeConversationId,
+      role: 'user',
+      content,
+      reasoning: null,
+      modelId: null,
+      status: 'done',
+      tokenCount: null,
+      createdAt: new Date().toISOString(),
+      versionGroupId: null,
+      versionNumber: 1,
+      totalVersions: 1,
+    };
+    messages = [...messages, userMsg];
+
+    // Create N placeholder assistant messages for compare view
+    const now = new Date().toISOString();
+    const placeholders: Message[] = modelIds.map((modelId, idx) => ({
+      id: `placeholder-${idx}-${crypto.randomUUID()}`,
+      conversationId: activeConversationId,
+      role: 'assistant' as const,
+      content: '',
+      reasoning: null,
+      modelId,
+      status: 'streaming' as const,
+      tokenCount: null,
+      createdAt: now,
+      versionGroupId: null,
+      versionNumber: idx + 1,
+      totalVersions: modelIds.length,
+    }));
+    groupStreamingMessages = [...placeholders];
+    isStreaming = true;
+
+    // Track mapping from placeholder index to real message IDs
+    let startedCount = 0;
+    let finishedCount = 0;
+
+    try {
+      await api.sendMessageGroup(
+        activeConversationId,
+        content,
+        modelIds,
+        (event) => {
+          if (event.type === 'started') {
+            // Map backend messageId to placeholder by order of 'started' events
+            const placeholderIdx = startedCount;
+            startedCount++;
+            if (placeholderIdx < groupStreamingMessages.length) {
+              groupStreamingMessages[placeholderIdx] = {
+                ...groupStreamingMessages[placeholderIdx],
+                id: event.messageId,
+              };
+              groupStreamingMessages = [...groupStreamingMessages];
+            }
+            return;
+          }
+
+          // Find the message by messageId in groupStreamingMessages
+          const idx = groupStreamingMessages.findIndex((m) => m.id === event.messageId);
+
+          switch (event.type) {
+            case 'delta':
+              if (idx !== -1) {
+                groupStreamingMessages[idx] = {
+                  ...groupStreamingMessages[idx],
+                  content: groupStreamingMessages[idx].content + event.content,
+                };
+                groupStreamingMessages = [...groupStreamingMessages];
+              }
+              break;
+            case 'reasoning':
+              if (idx !== -1) {
+                groupStreamingMessages[idx] = {
+                  ...groupStreamingMessages[idx],
+                  reasoning: (groupStreamingMessages[idx].reasoning ?? '') + event.content,
+                };
+                groupStreamingMessages = [...groupStreamingMessages];
+              }
+              break;
+            case 'usage':
+              if (idx !== -1) {
+                groupStreamingMessages[idx] = {
+                  ...groupStreamingMessages[idx],
+                  tokenCount: event.promptTokens + event.completionTokens,
+                };
+                groupStreamingMessages = [...groupStreamingMessages];
+              }
+              break;
+            case 'finished':
+              if (idx !== -1) {
+                groupStreamingMessages[idx] = {
+                  ...groupStreamingMessages[idx],
+                  status: 'done',
+                };
+                groupStreamingMessages = [...groupStreamingMessages];
+              }
+              finishedCount++;
+              if (finishedCount >= modelIds.length) {
+                isStreaming = false;
+              }
+              break;
+            case 'error':
+              if (idx !== -1) {
+                groupStreamingMessages[idx] = {
+                  ...groupStreamingMessages[idx],
+                  status: 'error',
+                  content: groupStreamingMessages[idx].content || event.message,
+                };
+                groupStreamingMessages = [...groupStreamingMessages];
+              }
+              finishedCount++;
+              if (finishedCount >= modelIds.length) {
+                isStreaming = false;
+              }
+              break;
+          }
+        },
+      );
+      // After all done, reload messages from DB
+      await loadLatestMessages(activeConversationId);
+      void tryAutoRename(activeConversationId, messages.length);
+    } catch (e) {
+      console.error('Group send failed:', e);
+      isStreaming = false;
+      groupStreamingMessages = [];
+      await loadLatestMessages(activeConversationId);
+    }
+  }
+
+  function handleExitGroupCompare() {
+    groupStreamingMessages = [];
+    void loadLatestMessages(activeConversationId);
+  }
+
   function handleChatEvent(event: { type: string; [key: string]: any }) {
     console.log('[+page] handleChatEvent:', event);
     switch (event.type) {
       case 'send':
         handleSend(event.content);
+        break;
+      case 'groupSend':
+        handleGroupSend(event.content, event.modelIds);
+        break;
+      case 'exitGroupCompare':
+        handleExitGroupCompare();
         break;
       case 'delete':
         handleDelete(event.messageId);
@@ -888,6 +1036,7 @@ function handleConversationSelect(selection: ConversationSelection) {
         {isLoadingMoreMessages}
         canLoadOlderMessages={!isStreaming && !isCompressing}
         focusedMessageId={pendingFocusMessageId}
+        {groupStreamingMessages}
         bind:selectedModelId={currentModelId}
         disabled={isStreaming || isCompressing}
         onAssistantSelect={handleAssistantSelect}

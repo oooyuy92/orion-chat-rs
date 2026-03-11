@@ -86,6 +86,29 @@ pub fn create(conn: &Connection, msg: &Message) -> AppResult<()> {
     Ok(())
 }
 
+/// Like create(), but allows controlling is_active_version (used by group send).
+pub fn create_version(conn: &Connection, msg: &Message, is_active: bool) -> AppResult<()> {
+    conn.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, model_id, reasoning, token_completion, status, created_at, version_group_id, version_number, is_active_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        rusqlite::params![
+            msg.id,
+            msg.conversation_id,
+            role_to_str(&msg.role),
+            msg.content,
+            msg.model_id,
+            msg.reasoning,
+            msg.token_count,
+            status_to_str(&msg.status),
+            msg.created_at,
+            msg.version_group_id,
+            msg.version_number,
+            if is_active { 1 } else { 0 },
+        ],
+    )?;
+    Ok(())
+}
+
 pub struct MessagePage {
     pub messages: Vec<Message>,
     pub has_more: bool,

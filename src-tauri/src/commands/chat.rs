@@ -204,7 +204,7 @@ async fn run_stream(
     let cancel_rx = state.cancel_receiver.clone();
 
     let result = provider
-        .stream_chat(request, channel.clone(), cancel_rx)
+        .stream_chat(request, msg_id.to_string(), channel.clone(), cancel_rx)
         .await;
 
     match result {
@@ -234,6 +234,7 @@ async fn run_stream(
         Err(e) => {
             let err_msg = e.to_string();
             let _ = channel.send(ChatEvent::Error {
+                message_id: msg_id.to_string(),
                 message: err_msg.clone(),
             });
             let _ = state
@@ -571,7 +572,7 @@ pub async fn compress_conversation(
     let cancel_rx = state.cancel_receiver.clone();
 
     let result = provider
-        .stream_chat(request, channel.clone(), cancel_rx)
+        .stream_chat(request, "compress".to_string(), channel.clone(), cancel_rx)
         .await;
 
     match result {
@@ -621,11 +622,250 @@ pub async fn compress_conversation(
         }
         Err(e) => {
             let _ = channel.send(ChatEvent::Error {
+                message_id: "compress".to_string(),
                 message: e.to_string(),
             });
             Err(e)
         }
     }
+}
+
+/// Send a message to multiple models simultaneously (group/combo send).
+/// Creates one user message + N assistant version messages, streams all in parallel.
+#[tauri::command]
+pub async fn send_message_group(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    content: String,
+    model_ids: Vec<String>,
+    channel: Channel<ChatEvent>,
+) -> AppResult<Vec<Message>> {
+    if model_ids.is_empty() {
+        return Err(AppError::Provider("No models specified".into()));
+    }
+
+    // 1. Resolve all providers upfront (fail fast if any model is invalid)
+    let mut resolved: Vec<(Arc<dyn Provider>, String, String)> = Vec::new(); // (provider, provider_type, model_id)
+    for mid in &model_ids {
+        let (provider, provider_type) = resolve_provider(&state, mid).await?;
+        resolved.push((provider, provider_type, mid.clone()));
+    }
+
+    let now = chrono_now();
+
+    // 2. Create user message
+    let user_message_id = uuid::Uuid::new_v4().to_string();
+    let user_msg = Message {
+        id: user_message_id.clone(),
+        conversation_id: conversation_id.clone(),
+        role: Role::User,
+        content: content.clone(),
+        reasoning: None,
+        model_id: None,
+        status: MessageStatus::Done,
+        token_count: None,
+        created_at: now.clone(),
+        version_group_id: None,
+        version_number: 1,
+        total_versions: 1,
+    };
+    state
+        .db
+        .with_conn(|conn| db::messages::create(conn, &user_msg))?;
+
+    // Persist external pastes
+    let persisted_content =
+        persist_external_pastes(&state, &conversation_id, &user_message_id, &content, &now)?;
+    if persisted_content != content {
+        state.db.with_conn(|conn| {
+            db::messages::update_text(conn, &user_message_id, &persisted_content)
+        })?;
+    }
+
+    // 3. Create assistant messages as versions
+    let mut assistant_msg_ids: Vec<String> = Vec::new();
+    let first_msg_id = uuid::Uuid::new_v4().to_string();
+
+    // First message: is_active=1, no version_group_id yet
+    let first_msg = Message {
+        id: first_msg_id.clone(),
+        conversation_id: conversation_id.clone(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: Some(model_ids[0].clone()),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at: now.clone(),
+        version_group_id: None,
+        version_number: 1,
+        total_versions: model_ids.len() as u32,
+    };
+    state
+        .db
+        .with_conn(|conn| db::messages::create(conn, &first_msg))?;
+    assistant_msg_ids.push(first_msg_id.clone());
+
+    // Initialize version group on first message
+    state
+        .db
+        .with_conn(|conn| db::messages::init_version_group(conn, &first_msg_id))?;
+
+    // Create remaining version messages
+    for (idx, mid) in model_ids.iter().enumerate().skip(1) {
+        let msg_id = uuid::Uuid::new_v4().to_string();
+        let msg = Message {
+            id: msg_id.clone(),
+            conversation_id: conversation_id.clone(),
+            role: Role::Assistant,
+            content: String::new(),
+            reasoning: None,
+            model_id: Some(mid.clone()),
+            status: MessageStatus::Streaming,
+            token_count: None,
+            created_at: now.clone(),
+            version_group_id: Some(first_msg_id.clone()),
+            version_number: (idx + 1) as u32,
+            total_versions: model_ids.len() as u32,
+        };
+        state
+            .db
+            .with_conn(|conn| db::messages::create_version(conn, &msg, false))?;
+        assistant_msg_ids.push(msg_id);
+    }
+
+    // 4. Load conversation history once
+    let history = state
+        .db
+        .with_conn(|conn| db::messages::list_by_conversation(conn, &conversation_id))?;
+
+    // 5. Reset cancel once
+    let _ = state.cancel_sender.send(false);
+
+    // 6. Load params for all models
+    let assistant_prompt = load_assistant_system_prompt(&state, &conversation_id)?;
+    let expanded_history = history
+        .iter()
+        .map(|message| -> AppResult<Message> {
+            let mut cloned = message.clone();
+            cloned.content = expand_content_for_model(&state, &message.content)?;
+            Ok(cloned)
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let request_messages = build_request_messages(&expanded_history, assistant_prompt.as_deref());
+
+    // 7. Spawn concurrent tasks via JoinSet
+    let mut join_set = tokio::task::JoinSet::new();
+    let first_finished = std::sync::Arc::new(std::sync::Mutex::new(Option::<String>::None));
+
+    for (i, (provider, provider_type, model_id)) in resolved.into_iter().enumerate() {
+        let msg_id = assistant_msg_ids[i].clone();
+        let state_clone = state.inner().clone();
+        let channel_clone = channel.clone();
+        let conv_id = conversation_id.clone();
+        let request_messages = request_messages.clone();
+        let first_finished = first_finished.clone();
+
+        let common = CommonParams {
+            temperature: None,
+            top_p: None,
+            max_tokens: None,
+            stream: true,
+        };
+
+        let provider_params = default_provider_params(&provider_type);
+
+        join_set.spawn(async move {
+            let request = ChatRequest {
+                model: model_id.clone(),
+                messages: request_messages,
+                common,
+                provider_params,
+            };
+
+            let _ = channel_clone.send(ChatEvent::Started {
+                message_id: msg_id.clone(),
+            });
+
+            let cancel_rx = state_clone.cancel_receiver.clone();
+
+            let result = provider
+                .stream_chat(request, msg_id.clone(), channel_clone.clone(), cancel_rx)
+                .await;
+
+            match result {
+                Ok(stream_result) => {
+                    let _ = state_clone.db.with_conn(|conn| {
+                        db::messages::update_content(
+                            conn,
+                            &msg_id,
+                            &stream_result.content,
+                            stream_result.reasoning.as_deref(),
+                            Some(stream_result.prompt_tokens),
+                            Some(stream_result.completion_tokens),
+                        )
+                    });
+                    let _ = channel_clone.send(ChatEvent::Finished {
+                        message_id: msg_id.clone(),
+                    });
+
+                    // Track first to finish
+                    let mut lock = first_finished.lock().unwrap();
+                    if lock.is_none() {
+                        *lock = Some(msg_id.clone());
+                    }
+                }
+                Err(AppError::Cancelled) => {
+                    let _ = channel_clone.send(ChatEvent::Finished {
+                        message_id: msg_id.clone(),
+                    });
+                    let _ = state_clone.db.with_conn(|conn| {
+                        db::messages::update_content(conn, &msg_id, "", None, None, None)
+                    });
+                }
+                Err(e) => {
+                    let err_msg = e.to_string();
+                    let _ = channel_clone.send(ChatEvent::Error {
+                        message_id: msg_id.clone(),
+                        message: err_msg.clone(),
+                    });
+                    let _ = state_clone
+                        .db
+                        .with_conn(|conn| db::messages::set_error(conn, &msg_id, &err_msg));
+                }
+            }
+
+            let _ = state_clone
+                .db
+                .with_conn(|conn| db::conversations::touch(conn, &conv_id));
+        });
+    }
+
+    // 8. Wait for all tasks to complete
+    while let Some(_) = join_set.join_next().await {}
+
+    // 9. Activate the first version that finished successfully
+    if let Some(winner_id) = first_finished.lock().unwrap().as_ref() {
+        // Find its version_number
+        let winner = state.db.with_conn(|conn| db::messages::get(conn, winner_id));
+        if let Ok(msg) = winner {
+            if msg.status == MessageStatus::Done {
+                let _ = state.db.with_conn(|conn| {
+                    db::messages::switch_active_version(
+                        conn,
+                        &first_msg_id,
+                        msg.version_number,
+                    )
+                });
+            }
+        }
+    }
+
+    // 10. Return all final messages (versions)
+    let all_versions = state
+        .db
+        .with_conn(|conn| db::messages::list_versions(conn, &first_msg_id))?;
+    Ok(all_versions)
 }
 
 #[tauri::command]

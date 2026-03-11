@@ -107,6 +107,7 @@ impl GeminiProvider {
 
     fn handle_sse_data(
         &self,
+        message_id: &str,
         data: &str,
         channel: &Channel<ChatEvent>,
         acc: &mut StreamResult,
@@ -134,11 +135,13 @@ impl GeminiProvider {
                                         .get_or_insert_with(String::new)
                                         .push_str(text);
                                     let _ = channel.send(ChatEvent::Reasoning {
+                                        message_id: message_id.to_string(),
                                         content: text.to_string(),
                                     });
                                 } else {
                                     acc.content.push_str(text);
                                     let _ = channel.send(ChatEvent::Delta {
+                                        message_id: message_id.to_string(),
                                         content: text.to_string(),
                                     });
                                 }
@@ -159,6 +162,7 @@ impl GeminiProvider {
                 acc.prompt_tokens = prompt;
                 acc.completion_tokens = completion;
                 let _ = channel.send(ChatEvent::Usage {
+                    message_id: message_id.to_string(),
                     prompt_tokens: prompt,
                     completion_tokens: completion,
                 });
@@ -174,6 +178,7 @@ impl Provider for GeminiProvider {
     async fn stream_chat(
         &self,
         request: ChatRequest,
+        message_id: String,
         channel: Channel<ChatEvent>,
         mut cancel: watch::Receiver<bool>,
     ) -> AppResult<StreamResult> {
@@ -220,7 +225,7 @@ impl Provider for GeminiProvider {
                                 for line in event_block.lines() {
                                     let line = line.trim();
                                     if let Some(data) = line.strip_prefix("data: ") {
-                                        self.handle_sse_data(data, &channel, &mut acc)?;
+                                        self.handle_sse_data(&message_id, data, &channel, &mut acc)?;
                                     }
                                 }
                             }

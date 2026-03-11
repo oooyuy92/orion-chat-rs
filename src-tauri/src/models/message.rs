@@ -53,11 +53,11 @@ pub struct ChatMessage {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ChatEvent {
     Started { message_id: String },
-    Delta { content: String },
-    Reasoning { content: String },
-    Usage { prompt_tokens: u32, completion_tokens: u32 },
+    Delta { message_id: String, content: String },
+    Reasoning { message_id: String, content: String },
+    Usage { message_id: String, prompt_tokens: u32, completion_tokens: u32 },
     Finished { message_id: String },
-    Error { message: String },
+    Error { message_id: String, message: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

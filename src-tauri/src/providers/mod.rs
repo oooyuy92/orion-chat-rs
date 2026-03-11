@@ -24,6 +24,7 @@ pub trait Provider: Send + Sync {
     async fn stream_chat(
         &self,
         request: ChatRequest,
+        message_id: String,
         channel: Channel<ChatEvent>,
         cancel: watch::Receiver<bool>,
     ) -> AppResult<StreamResult>;

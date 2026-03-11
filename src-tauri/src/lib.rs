@@ -78,6 +78,7 @@ pub fn run() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::chat::send_message,
+            commands::chat::send_message_group,
             commands::chat::resend_message,
             commands::chat::stop_generation,
             commands::chat::generate_version,
@@ -101,6 +102,7 @@ pub fn run() {
             commands::conversation::get_paste_blob_content,
             commands::conversation::switch_version,
             commands::conversation::list_versions,
+            commands::conversation::list_version_messages,
             commands::conversation::get_version_models,
             commands::provider::add_provider,
             commands::provider::list_providers,

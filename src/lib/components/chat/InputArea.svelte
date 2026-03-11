@@ -2,6 +2,7 @@
   import type { ModelGroup, ProviderType } from '$lib/types';
   import ModelSelector from './ModelSelector.svelte';
   import ModelParamsPopover from './ModelParamsPopover.svelte';
+  import ComboSelector from './ComboSelector.svelte';
   import { i18n } from '$lib/stores/i18n.svelte';
 
   const PASTE_THRESHOLD = 500;
@@ -10,6 +11,7 @@
     disabled = false,
     disabledReason = '',
     onSend,
+    onGroupSend,
     onStop,
     suggestions = [],
     modelGroups = [],
@@ -18,6 +20,7 @@
     disabled?: boolean;
     disabledReason?: string;
     onSend: (content: string) => void;
+    onGroupSend?: (content: string, modelIds: string[]) => void;
     onStop?: () => void;
     suggestions?: string[];
     modelGroups?: ModelGroup[];
@@ -27,6 +30,7 @@
   let editorEl: HTMLDivElement | undefined = $state();
   let hasContent = $state(false);
   const pastedBlocks = new Map<string, string>();
+  let activeComboModelIds = $state<string[] | null>(null);
 
   const currentProviderType = $derived.by(() => {
     for (const group of modelGroups) {
@@ -121,7 +125,11 @@
   function submit() {
     const content = getContent().trim();
     if (!content || disabled) return;
-    onSend(content);
+    if (activeComboModelIds && activeComboModelIds.length > 1) {
+      onGroupSend?.(content, activeComboModelIds);
+    } else {
+      onSend(content);
+    }
     if (editorEl) editorEl.innerHTML = '';
     pastedBlocks.clear();
     hasContent = false;
@@ -152,6 +160,13 @@
   <div class="model-row">
     <ModelSelector {modelGroups} bind:selected={selectedModelId} />
     <ModelParamsPopover modelId={selectedModelId} providerType={currentProviderType} {disabled} />
+    <ComboSelector
+      {modelGroups}
+      {disabled}
+      {activeComboModelIds}
+      onSelectCombo={(modelIds) => (activeComboModelIds = modelIds)}
+      onClearCombo={() => (activeComboModelIds = null)}
+    />
   </div>
 
   <div class="input-group">

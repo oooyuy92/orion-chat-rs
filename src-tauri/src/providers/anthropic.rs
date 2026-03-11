@@ -142,6 +142,7 @@ impl AnthropicProvider {
 
     fn handle_sse_event(
         &self,
+        message_id: &str,
         event_type: &str,
         data: &str,
         channel: &Channel<ChatEvent>,
@@ -158,6 +159,7 @@ impl AnthropicProvider {
                                 if !text.is_empty() {
                                     acc.content.push_str(text);
                                     let _ = channel.send(ChatEvent::Delta {
+                                        message_id: message_id.to_string(),
                                         content: text.to_string(),
                                     });
                                 }
@@ -170,6 +172,7 @@ impl AnthropicProvider {
                                         .get_or_insert_with(String::new)
                                         .push_str(thinking);
                                     let _ = channel.send(ChatEvent::Reasoning {
+                                        message_id: message_id.to_string(),
                                         content: thinking.to_string(),
                                     });
                                 }
@@ -184,6 +187,7 @@ impl AnthropicProvider {
                     if let Some(input) = usage["input_tokens"].as_u64() {
                         acc.prompt_tokens = input as u32;
                         let _ = channel.send(ChatEvent::Usage {
+                            message_id: message_id.to_string(),
                             prompt_tokens: input as u32,
                             completion_tokens: 0,
                         });
@@ -195,6 +199,7 @@ impl AnthropicProvider {
                     if let Some(output) = usage["output_tokens"].as_u64() {
                         acc.completion_tokens = output as u32;
                         let _ = channel.send(ChatEvent::Usage {
+                            message_id: message_id.to_string(),
                             prompt_tokens: 0,
                             completion_tokens: output as u32,
                         });
@@ -213,6 +218,7 @@ impl Provider for AnthropicProvider {
     async fn stream_chat(
         &self,
         request: ChatRequest,
+        message_id: String,
         channel: Channel<ChatEvent>,
         mut cancel: watch::Receiver<bool>,
     ) -> AppResult<StreamResult> {
@@ -261,7 +267,7 @@ impl Provider for AnthropicProvider {
                                         current_event = evt.trim().to_string();
                                     } else if let Some(data) = line.strip_prefix("data: ") {
                                         if !current_event.is_empty() {
-                                            self.handle_sse_event(&current_event, data, &channel, &mut acc)?;
+                                            self.handle_sse_event(&message_id, &current_event, data, &channel, &mut acc)?;
                                         }
                                     }
                                 }
@@ -274,6 +280,7 @@ impl Provider for AnthropicProvider {
                 _ = cancel.changed() => {
                     if *cancel.borrow() {
                         let _ = channel.send(ChatEvent::Error {
+                            message_id: message_id.clone(),
                             message: "Cancelled".into(),
                         });
                         return Err(AppError::Cancelled);

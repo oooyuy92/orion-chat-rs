@@ -147,3 +147,9 @@ export interface Assistant {
   sortOrder: number;
   createdAt: string;
 }
+
+export interface ModelCombo {
+  id: string;
+  name: string;
+  modelIds: string[];
+}

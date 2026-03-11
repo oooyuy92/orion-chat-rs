@@ -20,7 +20,8 @@
     | { type: 'editResend'; messageId: string; content: string }
     | { type: 'regenerate'; messageId: string; modelId: string | null }
     | { type: 'generateVersion'; messageId: string }
-    | { type: 'switchVersion'; versionGroupId: string; versionNumber: number };
+    | { type: 'switchVersion'; versionGroupId: string; versionNumber: number }
+    | { type: 'expandVersions'; versionGroupId: string };
 
   let {
     conversationId = '',

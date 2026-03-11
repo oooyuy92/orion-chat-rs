@@ -6,6 +6,8 @@
   import { Input } from '$lib/components/ui/input';
   import { Slider } from '$lib/components/ui/slider';
   import AssistantSettings from '$lib/components/settings/AssistantSettings.svelte';
+  import { loadCombos, saveCombos, addCombo, deleteCombo } from '$lib/stores/modelCombos';
+  import type { ModelCombo } from '$lib/types';
   import { load as loadStore } from '@tauri-apps/plugin-store';
   import { getVersion } from '@tauri-apps/api/app';
   import { i18n, type Language } from '$lib/stores/i18n.svelte';
@@ -14,6 +16,7 @@
   type NavItemId =
     | 'modelService'
     | 'assistants'
+    | 'modelCombos'
     | 'generalSettings'
     | 'displaySettings'
     | 'dataSettings'
@@ -37,6 +40,8 @@
         return isEn ? 'Model Service' : '模型服务';
       case 'assistants':
         return isEn ? 'Assistant Settings' : '助手设置';
+      case 'modelCombos':
+        return isEn ? 'Model Combos' : '模型组合';
       case 'generalSettings':
         return isEn ? 'General Settings' : '常规设置';
       case 'displaySettings':
@@ -57,7 +62,7 @@
   }
 
   const sectionGroups = $derived.by((): SectionGroup[] => [
-    { title: navLabel('modelService'), items: ['modelService', 'assistants', 'generalSettings', 'displaySettings', 'dataSettings'] },
+    { title: navLabel('modelService'), items: ['modelService', 'assistants', 'modelCombos', 'generalSettings', 'displaySettings', 'dataSettings'] },
     { title: language === 'en' ? 'MCP Servers' : 'MCP 服务器', items: ['networkSearch', 'globalMemory', 'quickPhrases', 'shortcuts'] },
     { title: language === 'en' ? 'Other' : '其他', items: ['about'] },
   ]);
@@ -97,6 +102,104 @@
   let editNameInput = $state<HTMLInputElement | null>(null);
   let contextMenu = $state<{ x: number; y: number; providerId: string } | null>(null);
   let modelSearch = $state('');
+
+  // Model combos state
+  let combos = $state<ModelCombo[]>([]);
+  let editingComboId = $state<string | null>(null);
+  let editComboName = $state('');
+  let editComboModelIds = $state<string[]>([]);
+  let slotPickerIndex = $state<number | null>(null); // which slot is picking a model (null=closed, -1=adding new)
+
+  const allEnabledModels = $derived(
+    providers
+      .filter((p) => p.enabled)
+      .flatMap((p) => p.models.filter((m) => m.enabled).map((m) => ({ ...m, providerName: p.name })))
+  );
+
+  async function loadComboList() {
+    combos = await loadCombos();
+  }
+
+  function startNewCombo() {
+    editingComboId = 'new';
+    editComboName = '';
+    editComboModelIds = [];
+    slotPickerIndex = null;
+  }
+
+  function startEditCombo(combo: ModelCombo) {
+    editingComboId = combo.id;
+    editComboName = combo.name;
+    editComboModelIds = [...combo.modelIds];
+    slotPickerIndex = null;
+  }
+
+  function cancelEditCombo() {
+    editingComboId = null;
+    slotPickerIndex = null;
+  }
+
+  function removeComboModelAt(index: number) {
+    editComboModelIds = editComboModelIds.filter((_, i) => i !== index);
+    slotPickerIndex = null;
+  }
+
+  function openSlotPicker(index: number) {
+    // Toggle: if clicking the same slot, close it
+    slotPickerIndex = slotPickerIndex === index ? null : index;
+  }
+
+  function pickModelForSlot(modelId: string) {
+    if (slotPickerIndex === null) return;
+    if (slotPickerIndex === -1) {
+      // Adding new
+      editComboModelIds = [...editComboModelIds, modelId];
+    } else {
+      // Swapping existing
+      editComboModelIds = editComboModelIds.map((id, i) => (i === slotPickerIndex ? modelId : id));
+    }
+    slotPickerIndex = null;
+  }
+
+  function resolveComboModelName(modelId: string): { name: string; providerName: string } {
+    for (const m of allEnabledModels) {
+      if (m.id === modelId) return { name: m.name, providerName: m.providerName };
+    }
+    return { name: modelId, providerName: '' };
+  }
+
+  async function saveCombo() {
+    if (!editComboName.trim() || editComboModelIds.length < 2) return;
+    if (editingComboId === 'new') {
+      const combo: ModelCombo = {
+        id: crypto.randomUUID(),
+        name: editComboName.trim(),
+        modelIds: editComboModelIds,
+      };
+      await addCombo(combo);
+    } else if (editingComboId) {
+      const updated = combos.map((c) =>
+        c.id === editingComboId
+          ? { ...c, name: editComboName.trim(), modelIds: editComboModelIds }
+          : c,
+      );
+      await saveCombos(updated);
+    }
+    editingComboId = null;
+    slotPickerIndex = null;
+    await loadComboList();
+  }
+
+  async function handleDeleteCombo(id: string) {
+    await deleteCombo(id);
+    await loadComboList();
+  }
+
+  $effect(() => {
+    if (activeNav === 'modelCombos') {
+      loadComboList();
+    }
+  });
 
   // ── 常规设置 ──
   let proxyMode = $state<'system' | 'none'>('system');
@@ -1258,6 +1361,102 @@
     <section class="assistants-panel">
       <AssistantSettings />
     </section>
+  {:else if activeNav === 'modelCombos'}
+    {#snippet comboEditor()}
+      <div class="combo-editor">
+        <div class="combo-field">
+          <span class="combo-label">{i18n.t.comboName}</span>
+          <Input bind:value={editComboName} placeholder={i18n.t.comboName} />
+        </div>
+
+        <div class="combo-field">
+          <span class="combo-label">{i18n.t.comboModels}</span>
+          <div class="combo-slots-row">
+            {#each editComboModelIds as modelId, idx (idx)}
+              {@const info = resolveComboModelName(modelId)}
+              <div class="combo-slot filled" class:picking={slotPickerIndex === idx}>
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div class="combo-slot-body" onclick={() => openSlotPicker(idx)}>
+                  <span class="combo-slot-name" title={info.name}>{info.name}</span>
+                  <span class="combo-slot-provider">{info.providerName}</span>
+                </div>
+                <button class="combo-slot-remove" onclick={(e) => { e.stopPropagation(); removeComboModelAt(idx); }} title={i18n.t.delete}>&times;</button>
+              </div>
+            {/each}
+            <!-- Add slot (dashed) -->
+            <button class="combo-slot dashed" class:picking={slotPickerIndex === -1} onclick={() => openSlotPicker(-1)}>
+              <span class="combo-slot-plus">+</span>
+            </button>
+          </div>
+        </div>
+
+        {#if slotPickerIndex !== null}
+          <div class="combo-picker">
+            <span class="combo-picker-title">
+              {slotPickerIndex === -1
+                ? (language === 'en' ? 'Add Model' : '添加模型')
+                : (language === 'en' ? 'Swap Model' : '更换模型')}
+            </span>
+            <div class="combo-picker-list">
+              {#each allEnabledModels as model (model.id)}
+                <button class="combo-picker-item" onclick={() => pickModelForSlot(model.id)}>
+                  <span class="combo-picker-model-name">{model.name}</span>
+                  <span class="combo-picker-model-provider">{model.providerName}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <div class="combo-actions">
+          <Button size="sm" variant="outline" onclick={cancelEditCombo}>{i18n.t.cancel}</Button>
+          <Button size="sm" onclick={saveCombo} disabled={!editComboName.trim() || editComboModelIds.length < 2}>
+            {language === 'en' ? 'Save' : '保存'}
+          </Button>
+        </div>
+      </div>
+    {/snippet}
+
+    <section class="combos-panel">
+      <div class="detail-header">
+        <h2>{i18n.t.modelCombos}</h2>
+        <Button size="sm" onclick={startNewCombo}>{i18n.t.addCombo}</Button>
+      </div>
+
+      {#if combos.length === 0 && editingComboId !== 'new'}
+        <div class="combo-empty-state">
+          <p>{i18n.t.noCombo}</p>
+        </div>
+      {:else}
+        <div class="combo-list-settings">
+          {#each combos as combo (combo.id)}
+            {#if editingComboId === combo.id}
+              {@render comboEditor()}
+            {:else}
+              <div class="combo-row">
+                <div class="combo-row-info">
+                  <span class="combo-row-name">{combo.name}</span>
+                  <span class="combo-row-count">{combo.modelIds.length} models</span>
+                </div>
+                <div class="combo-row-actions">
+                  <Button size="sm" variant="outline" onclick={() => startEditCombo(combo)}>
+                    {i18n.t.edit}
+                  </Button>
+                  <Button size="sm" variant="outline" onclick={() => handleDeleteCombo(combo.id)}>
+                    {i18n.t.delete}
+                  </Button>
+                </div>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      {/if}
+
+      {#if editingComboId === 'new'}
+        {@render comboEditor()}
+      {/if}
+    </section>
   {:else if activeNav === 'generalSettings'}
     <section class="general-panel">
       <div class="detail-header">
@@ -2094,6 +2293,248 @@
     min-width: 0;
     height: 100%;
     display: flex;
+  }
+
+  .combos-panel {
+    grid-column: 2 / -1;
+    padding: 1.2rem 1.5rem;
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .combo-editor {
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    background: var(--card);
+  }
+
+  .combo-field {
+    margin-bottom: 0.75rem;
+  }
+
+  .combo-label {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 500;
+    margin-bottom: 0.35rem;
+    color: var(--foreground);
+  }
+
+  /* ---- Combo slots (horizontal card layout) ---- */
+
+  .combo-slots-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: stretch;
+  }
+
+  .combo-slot {
+    position: relative;
+    width: 120px;
+    min-height: 64px;
+    border-radius: 0.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+  }
+
+  .combo-slot.filled {
+    border: 1px solid var(--border);
+    background: var(--card);
+    flex-direction: column;
+    padding: 0.5rem 0.4rem 0.4rem;
+    align-items: stretch;
+  }
+
+  .combo-slot.filled.picking {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 1px var(--primary);
+  }
+
+  .combo-slot.dashed {
+    border: 2px dashed var(--border);
+    background: none;
+    cursor: pointer;
+    color: var(--muted-foreground);
+    font-size: 1.2rem;
+  }
+
+  .combo-slot.dashed:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: color-mix(in oklch, var(--primary) 5%, transparent);
+  }
+
+  .combo-slot.dashed.picking {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  .combo-slot-body {
+    cursor: pointer;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+  }
+
+  .combo-slot-body:hover {
+    opacity: 0.8;
+  }
+
+  .combo-slot-name {
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: var(--foreground);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .combo-slot-provider {
+    font-size: 0.68rem;
+    color: var(--muted-foreground);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .combo-slot-remove {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--background);
+    color: var(--muted-foreground);
+    font-size: 0.75rem;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .combo-slot-remove:hover {
+    background: var(--destructive);
+    color: white;
+    border-color: var(--destructive);
+  }
+
+  .combo-slot-plus {
+    font-weight: 300;
+  }
+
+  /* ---- Combo model picker dropdown ---- */
+
+  .combo-picker {
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    margin-top: 0.5rem;
+    background: var(--card);
+    overflow: hidden;
+  }
+
+  .combo-picker-title {
+    display: block;
+    padding: 0.5rem 0.6rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--muted-foreground);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .combo-picker-list {
+    max-height: 200px;
+    overflow-y: auto;
+    padding: 0.25rem;
+  }
+
+  .combo-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.45rem 0.55rem;
+    border: none;
+    background: none;
+    border-radius: 0.3rem;
+    cursor: pointer;
+    font-size: 0.8rem;
+    color: var(--foreground);
+    text-align: left;
+  }
+
+  .combo-picker-item:hover {
+    background: var(--muted);
+  }
+
+  .combo-picker-model-name {
+    flex: 1;
+  }
+
+  .combo-picker-model-provider {
+    color: var(--muted-foreground);
+    font-size: 0.72rem;
+  }
+
+  .combo-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    margin-top: 0.75rem;
+  }
+
+  .combo-empty-state {
+    text-align: center;
+    color: var(--muted-foreground);
+    padding: 2rem;
+    font-size: 0.85rem;
+  }
+
+  .combo-list-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .combo-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--card);
+  }
+
+  .combo-row-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .combo-row-name {
+    font-weight: 500;
+    font-size: 0.85rem;
+    color: var(--foreground);
+  }
+
+  .combo-row-count {
+    font-size: 0.75rem;
+    color: var(--muted-foreground);
+  }
+
+  .combo-row-actions {
+    display: flex;
+    gap: 0.35rem;
   }
 
   .general-switch-row {

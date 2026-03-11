@@ -112,6 +112,7 @@ impl OllamaProvider {
 
     fn handle_ndjson_line(
         &self,
+        message_id: &str,
         line: &str,
         channel: &Channel<ChatEvent>,
         acc: &mut StreamResult,
@@ -127,6 +128,7 @@ impl OllamaProvider {
             acc.completion_tokens = completion;
             if prompt > 0 || completion > 0 {
                 let _ = channel.send(ChatEvent::Usage {
+                    message_id: message_id.to_string(),
                     prompt_tokens: prompt,
                     completion_tokens: completion,
                 });
@@ -139,6 +141,7 @@ impl OllamaProvider {
                 if !content.is_empty() {
                     acc.content.push_str(content);
                     let _ = channel.send(ChatEvent::Delta {
+                        message_id: message_id.to_string(),
                         content: content.to_string(),
                     });
                 }
@@ -149,6 +152,7 @@ impl OllamaProvider {
                         .get_or_insert_with(String::new)
                         .push_str(thinking);
                     let _ = channel.send(ChatEvent::Reasoning {
+                        message_id: message_id.to_string(),
                         content: thinking.to_string(),
                     });
                 }
@@ -164,6 +168,7 @@ impl Provider for OllamaProvider {
     async fn stream_chat(
         &self,
         request: ChatRequest,
+        message_id: String,
         channel: Channel<ChatEvent>,
         mut cancel: watch::Receiver<bool>,
     ) -> AppResult<StreamResult> {
@@ -206,7 +211,7 @@ impl Provider for OllamaProvider {
                                     continue;
                                 }
 
-                                let done = self.handle_ndjson_line(&line, &channel, &mut acc)?;
+                                let done = self.handle_ndjson_line(&message_id, &line, &channel, &mut acc)?;
                                 if done {
                                     return Ok(acc);
                                 }
@@ -219,6 +224,7 @@ impl Provider for OllamaProvider {
                 _ = cancel.changed() => {
                     if *cancel.borrow() {
                         let _ = channel.send(ChatEvent::Error {
+                            message_id: message_id.clone(),
                             message: "Cancelled".into(),
                         });
                         return Err(AppError::Cancelled);

@@ -101,6 +101,7 @@ impl OpenAICompatProvider {
 
     fn handle_sse_data(
         &self,
+        message_id: &str,
         data: &str,
         channel: &Channel<ChatEvent>,
         acc: &mut StreamResult,
@@ -115,6 +116,7 @@ impl OpenAICompatProvider {
                     if !content.is_empty() {
                         acc.content.push_str(content);
                         let _ = channel.send(ChatEvent::Delta {
+                            message_id: message_id.to_string(),
                             content: content.to_string(),
                         });
                     }
@@ -126,6 +128,7 @@ impl OpenAICompatProvider {
                             .get_or_insert_with(String::new)
                             .push_str(reasoning);
                         let _ = channel.send(ChatEvent::Reasoning {
+                            message_id: message_id.to_string(),
                             content: reasoning.to_string(),
                         });
                     }
@@ -141,6 +144,7 @@ impl OpenAICompatProvider {
                 acc.prompt_tokens = prompt as u32;
                 acc.completion_tokens = completion as u32;
                 let _ = channel.send(ChatEvent::Usage {
+                    message_id: message_id.to_string(),
                     prompt_tokens: prompt as u32,
                     completion_tokens: completion as u32,
                 });
@@ -156,6 +160,7 @@ impl Provider for OpenAICompatProvider {
     async fn stream_chat(
         &self,
         request: ChatRequest,
+        message_id: String,
         channel: Channel<ChatEvent>,
         mut cancel: watch::Receiver<bool>,
     ) -> AppResult<StreamResult> {
@@ -201,7 +206,7 @@ impl Provider for OpenAICompatProvider {
                                         return Ok(acc);
                                     }
                                     if let Some(data) = line.strip_prefix("data: ") {
-                                        self.handle_sse_data(data, &channel, &mut acc)?;
+                                        self.handle_sse_data(&message_id, data, &channel, &mut acc)?;
                                     }
                                 }
                             }
@@ -213,6 +218,7 @@ impl Provider for OpenAICompatProvider {
                 _ = cancel.changed() => {
                     if *cancel.borrow() {
                         let _ = channel.send(ChatEvent::Error {
+                            message_id: message_id.clone(),
                             message: "Cancelled".into(),
                         });
                         return Err(AppError::Cancelled);

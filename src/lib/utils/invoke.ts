@@ -12,17 +12,18 @@ import type {
   CommonParams,
   ProviderParams,
   SearchSidebarResult,
+  ModelCombo,
 } from '$lib/types';
 
 export type ChatEventHandler = (event: ChatEvent) => void;
 
 export type ChatEvent =
   | { type: 'started'; messageId: string }
-  | { type: 'delta'; content: string }
-  | { type: 'reasoning'; content: string }
-  | { type: 'usage'; promptTokens: number; completionTokens: number }
+  | { type: 'delta'; messageId: string; content: string }
+  | { type: 'reasoning'; messageId: string; content: string }
+  | { type: 'usage'; messageId: string; promptTokens: number; completionTokens: number }
   | { type: 'finished'; messageId: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; messageId: string; message: string };
 
 export type AppPaths = {
   dataDir: string;
@@ -67,6 +68,11 @@ export const api = {
     const channel = new Channel<ChatEvent>();
     channel.onmessage = onEvent;
     return invoke('send_message', { conversationId, content, modelId, channel, commonParams: commonParams ?? null, providerParams: providerParams ?? null });
+  },
+  sendMessageGroup(conversationId: string, content: string, modelIds: string[], onEvent: ChatEventHandler): Promise<Message[]> {
+    const channel = new Channel<ChatEvent>();
+    channel.onmessage = onEvent;
+    return invoke('send_message_group', { conversationId, content, modelIds, channel });
   },
   resendMessage(conversationId: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
     const channel = new Channel<ChatEvent>();
@@ -122,6 +128,9 @@ export const api = {
   },
   listVersions(versionGroupId: string): Promise<VersionInfo[]> {
     return invoke('list_versions', { versionGroupId });
+  },
+  listVersionMessages(versionGroupId: string): Promise<Message[]> {
+    return invoke('list_version_messages', { versionGroupId });
   },
   getVersionModels(versionGroupId: string): Promise<[number, string][]> {
     return invoke('get_version_models', { versionGroupId });
