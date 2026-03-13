@@ -77,4 +77,45 @@ mod tests {
         })
         .unwrap();
     }
+
+    #[test]
+    fn test_migrations_add_model_source_with_synced_default() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE models (
+                id TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                display_name TEXT,
+                max_tokens INTEGER,
+                is_vision INTEGER NOT NULL DEFAULT 0,
+                supports_thinking INTEGER NOT NULL DEFAULT 0,
+                is_enabled INTEGER NOT NULL DEFAULT 1
+            );
+            ",
+        )
+        .unwrap();
+
+        migrations::run(&conn).unwrap();
+
+        let source_exists = conn
+            .prepare("PRAGMA table_info(models)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .flatten()
+            .any(|name| name == "source");
+        assert!(source_exists);
+
+        conn.execute(
+            "INSERT INTO models (id, provider_id, name) VALUES (?1, ?2, ?3)",
+            ("m1", "p1", "gpt-4.1"),
+        )
+        .unwrap();
+        let source: String = conn
+            .query_row("SELECT source FROM models WHERE id = 'm1'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(source, "synced");
+    }
 }

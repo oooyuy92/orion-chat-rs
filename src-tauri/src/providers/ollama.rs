@@ -259,12 +259,15 @@ impl Provider for OllamaProvider {
                 let name = m["name"].as_str()?.to_string();
                 Some(ModelInfo {
                     id: name.clone(),
-                    name,
+                    name: name.clone(),
+                    request_name: name.clone(),
+                    display_name: Some(name),
                     provider_id: String::new(),
                     context_length: None,
                     supports_vision: false,
                     supports_streaming: true,
                     enabled: true,
+                    source: crate::models::ModelSource::Synced,
                 })
             })
             .collect();

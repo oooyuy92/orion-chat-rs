@@ -304,11 +304,14 @@ impl Provider for AnthropicProvider {
             .map(|(id, name)| ModelInfo {
                 id: id.to_string(),
                 name: name.to_string(),
+                request_name: id.to_string(),
+                display_name: Some(name.to_string()),
                 provider_id: String::new(),
                 context_length: Some(200000),
                 supports_vision: true,
                 supports_streaming: true,
                 enabled: true,
+                source: crate::models::ModelSource::Synced,
             })
             .collect())
     }

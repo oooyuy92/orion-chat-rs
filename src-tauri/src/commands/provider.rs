@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tauri::State;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{ModelInfo, ProviderConfig, ProviderType};
+use crate::models::{ModelInfo, ModelSource, ProviderConfig, ProviderType};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -184,24 +184,26 @@ pub async fn fetch_models(
     // Set provider_id on each model
     for m in &mut models {
         m.provider_id = provider_id.clone();
+        m.source = ModelSource::Synced;
     }
 
     // Save to DB (upsert)
     state.db.with_conn(|conn| {
         for m in &models {
             conn.execute(
-                "INSERT INTO models (id, provider_id, name, display_name, max_tokens, is_vision, is_enabled)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1)
+                "INSERT INTO models (id, provider_id, name, display_name, max_tokens, is_vision, is_enabled, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'synced')
                  ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     display_name = excluded.display_name,
                     max_tokens = excluded.max_tokens,
-                    is_vision = excluded.is_vision",
+                    is_vision = excluded.is_vision,
+                    source = 'synced'",
                 rusqlite::params![
                     m.id,
                     m.provider_id,
-                    m.name,
-                    m.name,
+                    m.request_name,
+                    m.display_name.clone().unwrap_or_else(|| m.name.clone()),
                     m.context_length,
                     m.supports_vision as i32,
                 ],
@@ -289,17 +291,27 @@ fn load_models_for_provider(
     provider_id: &str,
 ) -> AppResult<Vec<ModelInfo>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, provider_id, max_tokens, is_vision, is_enabled FROM models WHERE provider_id = ?1",
+        "SELECT id, name, display_name, provider_id, max_tokens, is_vision, is_enabled, COALESCE(source, 'synced') FROM models WHERE provider_id = ?1",
     )?;
     let rows = stmt.query_map([provider_id], |row| {
+        let request_name: String = row.get(1)?;
+        let display_name: Option<String> = row.get(2)?;
+        let source: String = row.get(7)?;
+        let resolved_name = display_name
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| request_name.clone());
         Ok(ModelInfo {
             id: row.get(0)?,
-            name: row.get(1)?,
-            provider_id: row.get(2)?,
-            context_length: row.get(3)?,
-            supports_vision: row.get::<_, i32>(4)? != 0,
+            name: resolved_name,
+            request_name,
+            display_name,
+            provider_id: row.get(3)?,
+            context_length: row.get(4)?,
+            supports_vision: row.get::<_, i32>(5)? != 0,
             supports_streaming: true,
-            enabled: row.get::<_, i32>(5)? != 0,
+            enabled: row.get::<_, i32>(6)? != 0,
+            source: parse_model_source(&source),
         })
     })?;
     let mut result = Vec::new();
@@ -329,6 +341,13 @@ fn update_provider_models_visibility_in_db(
         "UPDATE models SET is_enabled = ?1 WHERE provider_id = ?2",
         rusqlite::params![if enabled { 1 } else { 0 }, provider_id],
     )?)
+}
+
+fn parse_model_source(value: &str) -> ModelSource {
+    match value {
+        "manual" => ModelSource::Manual,
+        _ => ModelSource::Synced,
+    }
 }
 
 #[cfg(test)]
@@ -426,5 +445,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(p2_enabled, 1);
+    }
+
+    #[test]
+    fn load_models_for_provider_prefers_display_name_and_preserves_request_name_and_source() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE models (
+              id TEXT PRIMARY KEY,
+              provider_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              display_name TEXT,
+              max_tokens INTEGER,
+              is_vision INTEGER NOT NULL DEFAULT 0,
+              is_enabled INTEGER NOT NULL DEFAULT 1,
+              source TEXT NOT NULL DEFAULT 'synced'
+            );
+            INSERT INTO models (id, provider_id, name, display_name, max_tokens, is_vision, is_enabled, source) VALUES
+              ('m1', 'p1', 'gpt-4.1', 'Friendly GPT', 128000, 1, 1, 'manual');
+            ",
+        )
+        .unwrap();
+
+        let models = load_models_for_provider(&conn, "p1").unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "Friendly GPT");
+        assert_eq!(models[0].request_name, "gpt-4.1");
+        assert_eq!(models[0].display_name.as_deref(), Some("Friendly GPT"));
+        assert_eq!(models[0].source, ModelSource::Manual);
     }
 }

@@ -258,12 +258,15 @@ impl Provider for OpenAICompatProvider {
                 let id = m["id"].as_str()?.to_string();
                 Some(ModelInfo {
                     name: id.clone(),
+                    request_name: id.clone(),
+                    display_name: Some(id.clone()),
                     id,
                     provider_id: String::new(),
                     context_length: None,
                     supports_vision: false,
                     supports_streaming: true,
                     enabled: true,
+                    source: crate::models::ModelSource::Synced,
                 })
             })
             .collect();
