@@ -118,4 +118,45 @@ mod tests {
             .unwrap();
         assert_eq!(source, "synced");
     }
+
+    #[test]
+    fn test_migrations_backfill_model_display_name_from_name() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE models (
+                id TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                display_name TEXT,
+                max_tokens INTEGER,
+                is_vision INTEGER NOT NULL DEFAULT 0,
+                supports_thinking INTEGER NOT NULL DEFAULT 0,
+                is_enabled INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO models (id, provider_id, name, display_name) VALUES
+                ('m1', 'p1', 'gpt-4.1', NULL),
+                ('m2', 'p1', 'gpt-4.1-mini', '');
+            ",
+        )
+        .unwrap();
+
+        migrations::run(&conn).unwrap();
+
+        let display_names: Vec<(String, String)> = conn
+            .prepare("SELECT id, display_name FROM models ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        assert_eq!(
+            display_names,
+            vec![
+                ("m1".to_string(), "gpt-4.1".to_string()),
+                ("m2".to_string(), "gpt-4.1-mini".to_string()),
+            ]
+        );
+    }
 }

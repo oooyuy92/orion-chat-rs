@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn load_models_for_provider_prefers_display_name_and_preserves_request_name_and_source() {
+    fn load_models_for_provider_uses_display_name_when_present() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "
@@ -474,5 +474,41 @@ mod tests {
         assert_eq!(models[0].request_name, "gpt-4.1");
         assert_eq!(models[0].display_name.as_deref(), Some("Friendly GPT"));
         assert_eq!(models[0].source, ModelSource::Manual);
+    }
+
+    #[test]
+    fn load_models_for_provider_falls_back_to_request_name_when_display_name_missing_or_blank() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE models (
+              id TEXT PRIMARY KEY,
+              provider_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              display_name TEXT,
+              max_tokens INTEGER,
+              is_vision INTEGER NOT NULL DEFAULT 0,
+              is_enabled INTEGER NOT NULL DEFAULT 1,
+              source TEXT NOT NULL DEFAULT 'synced'
+            );
+            INSERT INTO models (id, provider_id, name, display_name, max_tokens, is_vision, is_enabled, source) VALUES
+              ('m1', 'p1', 'gpt-4.1', NULL, 128000, 1, 1, 'synced'),
+              ('m2', 'p1', 'gpt-4.1-mini', '', 64000, 0, 1, 'synced');
+            ",
+        )
+        .unwrap();
+
+        let models = load_models_for_provider(&conn, "p1").unwrap();
+        assert_eq!(models.len(), 2);
+
+        assert_eq!(models[0].name, "gpt-4.1");
+        assert_eq!(models[0].request_name, "gpt-4.1");
+        assert_eq!(models[0].display_name, None);
+        assert_eq!(models[0].source, ModelSource::Synced);
+
+        assert_eq!(models[1].name, "gpt-4.1-mini");
+        assert_eq!(models[1].request_name, "gpt-4.1-mini");
+        assert_eq!(models[1].display_name.as_deref(), Some(""));
+        assert_eq!(models[1].source, ModelSource::Synced);
     }
 }
