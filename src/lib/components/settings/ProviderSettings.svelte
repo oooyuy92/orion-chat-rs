@@ -2,12 +2,14 @@
   import { onMount, tick } from 'svelte';
   import type { ProviderConfig, ProviderType } from '$lib/types';
   import { api } from '$lib/utils/invoke';
+  import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import { Slider } from '$lib/components/ui/slider';
   import AssistantSettings from '$lib/components/settings/AssistantSettings.svelte';
   import { loadCombos, saveCombos, addCombo, deleteCombo } from '$lib/stores/modelCombos';
   import type { ModelCombo } from '$lib/types';
+  import { isManualModel, resolveModelLabel, resolveModelSecondaryLabel } from '$lib/utils/modelDisplay';
   import { load as loadStore } from '@tauri-apps/plugin-store';
   import { getVersion } from '@tauri-apps/api/app';
   import { i18n, type Language } from '$lib/stores/i18n.svelte';
@@ -102,6 +104,11 @@
   let editNameInput = $state<HTMLInputElement | null>(null);
   let contextMenu = $state<{ x: number; y: number; providerId: string } | null>(null);
   let modelSearch = $state('');
+  let showAddModelDialog = $state(false);
+  let creatingManualModel = $state(false);
+  let manualModelRequestName = $state('');
+  let manualModelDisplayName = $state('');
+  let manualModelEnabled = $state(true);
 
   // Model combos state
   let combos = $state<ModelCombo[]>([]);
@@ -563,10 +570,19 @@
         selectAll: 'Select All',
         deselectAll: 'Deselect All',
         syncModels: 'Sync Models',
+        addModel: 'Add Model',
         syncing: 'Syncing...',
         noModels: 'No models. Click "Sync Models" to fetch.',
         noMatchModels: 'No matching models',
         disabledHint: 'Provider is disabled. Model selection is preserved but won\'t show in chat.',
+        requestModelName: 'Request Model Name',
+        requestModelPlaceholder: 'e.g. gpt-4.1',
+        displayModelName: 'Display Name / Remark',
+        displayModelPlaceholder: 'Optional label shown in the UI',
+        saveModel: 'Save Model',
+        savingModel: 'Saving...',
+        manualSource: 'Manual',
+        addModelTitle: 'Add Manual Model',
         selectProvider: 'Select a Provider',
         selectProviderHint: 'Choose from the list or click "Add" to create one.',
         setDefault: 'Set as Default',
@@ -654,10 +670,19 @@
       selectAll: '全选',
       deselectAll: '全不选',
       syncModels: '同步模型',
+      addModel: '添加模型',
       syncing: '同步中...',
       noModels: '暂无模型，点击"同步模型"拉取。',
       noMatchModels: '无匹配模型',
       disabledHint: '当前服务已停用，模型勾选状态会保留但不会在聊天中显示。',
+      requestModelName: '请求模型名',
+      requestModelPlaceholder: '例如：gpt-4.1',
+      displayModelName: '显示名 / 备注',
+      displayModelPlaceholder: '选填，用于界面展示',
+      saveModel: '保存模型',
+      savingModel: '保存中...',
+      manualSource: '手动',
+      addModelTitle: '添加手动模型',
       selectProvider: '请选择一个服务',
       selectProviderHint: '你可以在中间列表中选择，或先点击 "+ 添加" 创建新服务。',
       setDefault: '设成默认',
@@ -756,7 +781,15 @@
     const q = modelSearch.trim().toLowerCase();
     if (!q) return selectedProvider.models;
     return selectedProvider.models.filter((m) =>
-      (m.name || m.id).toLowerCase().includes(q),
+      [
+        resolveModelLabel(m),
+        resolveModelSecondaryLabel(m),
+        m.requestName,
+        m.id,
+      ]
+        .join(' ')
+        .toLowerCase()
+        .includes(q),
     );
   });
 
@@ -1005,6 +1038,54 @@
   }
 
   let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function resetManualModelDraft() {
+    manualModelRequestName = '';
+    manualModelDisplayName = '';
+    manualModelEnabled = true;
+  }
+
+  $effect(() => {
+    if (!showAddModelDialog) {
+      resetManualModelDraft();
+    }
+  });
+
+  async function handleCreateManualModel() {
+    if (!selectedProvider) return;
+    const providerId = selectedProvider.id;
+    const requestName = manualModelRequestName.trim();
+    if (!requestName) {
+      error = language === 'zh' ? '请求模型名不能为空。' : 'Request model name is required.';
+      return;
+    }
+
+    creatingManualModel = true;
+    error = '';
+    success = '';
+
+    try {
+      const model = await api.createManualModel(
+        providerId,
+        requestName,
+        manualModelDisplayName.trim() || null,
+        manualModelEnabled,
+      );
+
+      providers = providers.map((provider) =>
+        provider.id === providerId
+          ? { ...provider, models: [...provider.models, model] }
+          : provider,
+      );
+      showAddModelDialog = false;
+      success = language === 'zh' ? '模型已添加。' : 'Model added.';
+    } catch (e) {
+      console.error('Failed to create manual model:', e);
+      error = language === 'zh' ? `添加模型失败：${e}` : `Failed to add model: ${e}`;
+    } finally {
+      creatingManualModel = false;
+    }
+  }
 
   $effect(() => {
     if (!isDirty) return;
@@ -1320,6 +1401,15 @@
             >
               {syncingModels[selectedProvider.id] ? t.syncing : t.syncModels}
             </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              class="manualModelAddBtn"
+              onclick={() => (showAddModelDialog = true)}
+              disabled={!selectedProvider}
+            >
+              {t.addModel}
+            </Button>
           </div>
         </div>
 
@@ -1333,7 +1423,13 @@
                   disabled={!draftEnabled || updatingModels[model.id] || bulkUpdatingModels}
                   onclick={() => handleToggleModelVisibility(model.id, !model.enabled)}
                 >
-                  {model.name || model.id}
+                  <span class="model-card-primary">{resolveModelLabel(model)}</span>
+                  {#if resolveModelSecondaryLabel(model)}
+                    <span class="model-card-secondary">{resolveModelSecondaryLabel(model)}</span>
+                  {/if}
+                  {#if isManualModel(model)}
+                    <span class="model-source-badge">{t.manualSource}</span>
+                  {/if}
                 </button>
               {/each}
             </div>
@@ -1745,6 +1841,53 @@
   {/if}
 </div>
 
+<Dialog.Root bind:open={showAddModelDialog}>
+  <Dialog.Content class="manual-model-dialog">
+    <Dialog.Header>
+      <Dialog.Title>{t.addModelTitle}</Dialog.Title>
+      <Dialog.Description>
+        {selectedProvider ? selectedProvider.name : ''}
+      </Dialog.Description>
+    </Dialog.Header>
+
+    <div class="manual-model-form">
+      <label class="field-label">
+        {t.requestModelName}
+        <Input
+          bind:value={manualModelRequestName}
+          placeholder={t.requestModelPlaceholder}
+        />
+      </label>
+
+      <label class="field-label">
+        {t.displayModelName}
+        <Input
+          bind:value={manualModelDisplayName}
+          placeholder={t.displayModelPlaceholder}
+        />
+      </label>
+
+      <label class="switch-row">
+        <input
+          type="checkbox"
+          checked={manualModelEnabled}
+          onchange={(e) => (manualModelEnabled = (e.target as HTMLInputElement).checked)}
+        />
+        <span>{t.enabled}</span>
+      </label>
+    </div>
+
+    <Dialog.Footer>
+      <Button variant="outline" onclick={() => (showAddModelDialog = false)}>
+        {language === 'en' ? 'Cancel' : '取消'}
+      </Button>
+      <Button onclick={handleCreateManualModel} disabled={creatingManualModel || !manualModelRequestName.trim()}>
+        {creatingManualModel ? t.savingModel : t.saveModel}
+      </Button>
+    </Dialog.Footer>
+  </Dialog.Content>
+</Dialog.Root>
+
 {#if contextMenu}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="context-overlay" role="button" aria-label={i18n.t.close} tabindex="0" onclick={closeContextMenu} onkeydown={(e) => { if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ' ) { e.preventDefault(); closeContextMenu(); } }} oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}>
@@ -2154,6 +2297,10 @@
   }
 
   .model-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
     text-align: left;
     border: 1px solid var(--border);
     border-radius: 0.5rem;
@@ -2162,10 +2309,33 @@
     color: var(--muted-foreground);
     background: var(--muted);
     cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .model-card-primary {
+    font-weight: 600;
+    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    transition: all 0.15s;
+  }
+
+  .model-card-secondary {
+    font-size: 0.72rem;
+    opacity: 0.78;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .model-source-badge {
+    font-size: 0.68rem;
+    line-height: 1;
+    padding: 0.18rem 0.4rem;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+    opacity: 0.88;
   }
 
   .model-card:hover:not(:disabled) {
@@ -2181,6 +2351,17 @@
   .model-card:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  :global(.manual-model-dialog) {
+    max-width: 28rem;
+  }
+
+  .manual-model-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+    padding-top: 0.25rem;
   }
 
   /* Context Menu */
