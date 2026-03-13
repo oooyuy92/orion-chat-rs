@@ -47,15 +47,19 @@ export interface Conversation {
 }
 
 export type ProviderType = 'openaiCompat' | 'anthropic' | 'gemini' | 'ollama';
+export type ModelSource = 'synced' | 'manual';
 
 export interface ModelInfo {
   id: string;
   name: string;
+  requestName: string;
+  displayName: string | null;
   providerId: string;
   contextLength: number | null;
   supportsVision: boolean;
   supportsStreaming: boolean;
   enabled: boolean;
+  source: ModelSource;
 }
 
 export interface ModelGroup {
