@@ -14,6 +14,8 @@ import type {
   SearchSidebarResult,
   ModelCombo,
 } from '$lib/types';
+import { isTauri } from '$lib/api/platform';
+import { webApi } from '$lib/api/web/impl';
 
 export type ChatEventHandler = (event: ChatEvent) => void;
 
@@ -32,7 +34,7 @@ export type AppPaths = {
   cacheDir: string;
 };
 
-export const api = {
+const tauriApi = {
   // Conversations
   createConversation(title: string, assistantId?: string, modelId?: string): Promise<Conversation> {
     return invoke('create_conversation', { title, assistantId: assistantId ?? null, modelId: modelId ?? null });
@@ -226,3 +228,8 @@ searchSidebarResults(query: string): Promise<SearchSidebarResult[]> {
     return invoke('get_proxy_mode');
   },
 };
+
+// 根据运行环境自动选择 API 实现
+// Tauri 桌面端：使用 IPC invoke
+// Web 端（Docker 部署）：使用 HTTP fetch
+export const api = isTauri() ? tauriApi : webApi;
