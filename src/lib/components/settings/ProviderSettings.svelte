@@ -424,6 +424,8 @@
   }
 
   // ── Settings persistence with tauri-plugin-store ──
+  let settingsLoaded = $state(false);
+
   async function loadSettings() {
     try {
       await i18n.init();
@@ -451,6 +453,7 @@
       autoLaunch = await api.getAutostartEnabled();
       // Apply proxy from backend
       proxyMode = (await api.getProxyMode()) as 'system' | 'none';
+      settingsLoaded = true;
     } catch (e) {
       console.error('Failed to load settings:', e);
     }
@@ -484,6 +487,7 @@
     void compactBackup; void backupDir; void selectedColorIndex; void zoomLevel;
     void autoUpdate; void autoRename; void autoRenameModelId;
     void autoCompress; void autoCompressModelId; void autoCompressThreshold;
+    if (!settingsLoaded) return;
     saveSettings();
   });
 
