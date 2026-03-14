@@ -26,11 +26,21 @@ pub struct ProviderConfig {
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
+    pub request_name: String,
+    pub display_name: Option<String>,
     pub provider_id: String,
     pub context_length: Option<u32>,
     pub supports_vision: bool,
     pub supports_streaming: bool,
     pub enabled: bool,
+    pub source: ModelSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelSource {
+    Synced,
+    Manual,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ModelGroup } from '$lib/types';
+  import { resolveModelLabel } from '$lib/utils/modelDisplay';
   import {
     DropdownMenu,
     DropdownMenuContent,
@@ -29,6 +30,11 @@
     return null;
   });
 
+  const selectedModelLabel = $derived.by(() => {
+    const model = selectedModel();
+    return model ? resolveModelLabel(model) : i18n.t.selectModel;
+  });
+
   function handleSelect(modelId: string) {
     selected = modelId;
     onSelect?.(modelId);
@@ -42,7 +48,7 @@
         {...props}
         class="model-trigger"
       >
-        <span class="model-name">{selectedModel()?.name || i18n.t.selectModel}</span>
+        <span class="model-name">{selectedModelLabel}</span>
         <ChevronDownIcon class="h-3.5 w-3.5 opacity-50" />
       </button>
     {/snippet}
@@ -58,7 +64,7 @@
           onclick={() => handleSelect(model.id)}
           class={selected === model.id ? 'bg-accent' : ''}
         >
-          {model.name}
+          {resolveModelLabel(model)}
         </DropdownMenuItem>
       {/each}
     {/each}

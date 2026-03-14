@@ -154,6 +154,15 @@ const tauriApi = {
   fetchModels(providerId: string): Promise<ModelInfo[]> {
     return invoke('fetch_models', { providerId });
   },
+  createManualModel(providerId: string, requestName: string, displayName: string | null, enabled: boolean): Promise<ModelInfo> {
+    return invoke('create_manual_model', { providerId, requestName, displayName, enabled });
+  },
+  updateManualModel(modelId: string, requestName: string, displayName: string | null, enabled: boolean): Promise<ModelInfo> {
+    return invoke('update_manual_model', { modelId, requestName, displayName, enabled });
+  },
+  deleteManualModel(modelId: string): Promise<void> {
+    return invoke('delete_manual_model', { modelId });
+  },
   updateModelVisibility(modelId: string, enabled: boolean): Promise<void> {
     return invoke('update_model_visibility', { modelId, enabled });
   },

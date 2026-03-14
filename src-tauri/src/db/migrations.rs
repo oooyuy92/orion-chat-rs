@@ -25,7 +25,8 @@ pub fn run(conn: &Connection) -> AppResult<()> {
             max_tokens INTEGER,
             is_vision INTEGER NOT NULL DEFAULT 0,
             supports_thinking INTEGER NOT NULL DEFAULT 0,
-            is_enabled INTEGER NOT NULL DEFAULT 1
+            is_enabled INTEGER NOT NULL DEFAULT 1,
+            source TEXT NOT NULL DEFAULT 'synced'
         );
 
         CREATE TABLE IF NOT EXISTS assistants (
@@ -119,6 +120,16 @@ pub fn run(conn: &Connection) -> AppResult<()> {
         "ALTER TABLE messages ADD COLUMN is_active_version INTEGER NOT NULL DEFAULT 1",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE models ADD COLUMN source TEXT NOT NULL DEFAULT 'synced'",
+        [],
+    );
+    conn.execute(
+        "UPDATE models
+         SET display_name = name
+         WHERE display_name IS NULL OR trim(display_name) = ''",
+        [],
+    )?;
 
     // Purge soft-deleted messages older than 3 days
     conn.execute(

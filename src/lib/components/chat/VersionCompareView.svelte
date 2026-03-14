@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Message, ModelGroup } from '$lib/types';
   import { renderMarkdown } from '$lib/utils/markdown';
+  import { resolveModelLabel } from '$lib/utils/modelDisplay';
   import { i18n } from '$lib/stores/i18n.svelte';
   import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
 
@@ -18,7 +19,7 @@
     if (!modelId) return 'Unknown';
     for (const group of modelGroups) {
       const model = group.models.find((m) => m.id === modelId);
-      if (model) return model.name;
+      if (model) return resolveModelLabel(model);
     }
     return modelId;
   }

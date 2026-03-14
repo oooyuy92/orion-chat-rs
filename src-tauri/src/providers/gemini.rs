@@ -278,14 +278,18 @@ impl Provider for GeminiProvider {
                 if !supported.contains(&"generateContent") {
                     return None;
                 }
+                let display_name = m["displayName"].as_str().unwrap_or(id).to_string();
                 Some(ModelInfo {
-                    name: m["displayName"].as_str().unwrap_or(id).to_string(),
+                    name: display_name.clone(),
+                    request_name: id.to_string(),
+                    display_name: Some(display_name),
                     id: id.to_string(),
                     provider_id: String::new(),
                     context_length: m["inputTokenLimit"].as_u64().map(|v| v as u32),
                     supports_vision: false,
                     supports_streaming: true,
                     enabled: true,
+                    source: crate::models::ModelSource::Synced,
                 })
             })
             .collect();

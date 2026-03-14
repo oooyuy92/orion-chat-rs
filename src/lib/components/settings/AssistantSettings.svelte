@@ -5,6 +5,7 @@
   import { Slider } from '$lib/components/ui/slider';
   import { Textarea } from '$lib/components/ui/textarea';
   import { api } from '$lib/utils/invoke';
+  import { resolveModelLabel } from '$lib/utils/modelDisplay';
   import { i18n, type Language } from '$lib/stores/i18n.svelte';
   import { alignProviderParams, defaultProviderParams } from '$lib/stores/modelParams';
   import type {
@@ -121,7 +122,7 @@
           .filter((model) => model.enabled)
           .map((model) => ({
             id: model.id,
-            label: model.name || model.id,
+            label: resolveModelLabel(model),
             providerName: provider.name,
             providerType: provider.providerType,
           })),

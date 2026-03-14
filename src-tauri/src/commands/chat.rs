@@ -10,39 +10,48 @@ use crate::paste_storage;
 use crate::providers::Provider;
 use crate::state::AppState;
 
+struct ResolvedModelRequest {
+    provider_id: String,
+    provider_type: String,
+    request_model: String,
+}
+
+fn resolve_model_request(
+    conn: &rusqlite::Connection,
+    model_id: &str,
+) -> AppResult<ResolvedModelRequest> {
+    conn.query_row(
+        "SELECT m.provider_id, p.type, m.name
+         FROM models m
+         JOIN providers p ON p.id = m.provider_id
+         WHERE m.id = ?1",
+        [model_id],
+        |row| {
+            Ok(ResolvedModelRequest {
+                provider_id: row.get(0)?,
+                provider_type: row.get(1)?,
+                request_model: row.get(2)?,
+            })
+        },
+    )
+    .map_err(|_| AppError::NotFound(format!("Model {model_id}")))
+}
+
 /// Resolve provider instance and type from a model_id.
 async fn resolve_provider(
     state: &AppState,
     model_id: &str,
-) -> AppResult<(Arc<dyn Provider>, String)> {
-    let provider_id = state.db.with_conn(|conn| {
-        let pid: String = conn
-            .query_row(
-                "SELECT provider_id FROM models WHERE id = ?1",
-                [model_id],
-                |row| row.get(0),
-            )
-            .map_err(|_| AppError::NotFound(format!("Model {model_id}")))?;
-        Ok(pid)
-    })?;
+) -> AppResult<(Arc<dyn Provider>, String, String)> {
+    let resolved = state
+        .db
+        .with_conn(|conn| resolve_model_request(conn, model_id))?;
 
     let provider = state
-        .get_provider(&provider_id)
+        .get_provider(&resolved.provider_id)
         .await
-        .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id}")))?;
+        .ok_or_else(|| AppError::NotFound(format!("Provider {}", resolved.provider_id)))?;
 
-    let provider_type: String = state.db.with_conn(|conn| {
-        let pt: String = conn
-            .query_row(
-                "SELECT type FROM providers WHERE id = ?1",
-                [&provider_id],
-                |row| row.get(0),
-            )
-            .map_err(|_| AppError::NotFound(format!("Provider {provider_id}")))?;
-        Ok(pt)
-    })?;
-
-    Ok((provider, provider_type))
+    Ok((provider, resolved.provider_type, resolved.request_model))
 }
 
 /// Build default ProviderParams from provider type string.
@@ -162,7 +171,7 @@ async fn run_stream(
     state: &AppState,
     provider: Arc<dyn Provider>,
     provider_type: &str,
-    model_id: &str,
+    request_model: &str,
     msg_id: &str,
     conversation_id: &str,
     history: Vec<Message>,
@@ -190,7 +199,7 @@ async fn run_stream(
     common.stream = true;
 
     let request = ChatRequest {
-        model: model_id.to_string(),
+        model: request_model.to_string(),
         messages,
         common,
         provider_params: provider_params.unwrap_or_else(|| default_provider_params(provider_type)),
@@ -260,6 +269,7 @@ async fn do_stream(
     provider_type: &str,
     conversation_id: &str,
     model_id: &str,
+    request_model: &str,
     channel: &Channel<ChatEvent>,
     common_params: Option<CommonParams>,
     provider_params: Option<ProviderParams>,
@@ -293,7 +303,7 @@ async fn do_stream(
         state,
         provider,
         provider_type,
-        model_id,
+        request_model,
         &assistant_msg_id,
         conversation_id,
         history,
@@ -314,7 +324,7 @@ pub async fn send_message(
     common_params: Option<CommonParams>,
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
-    let (provider, provider_type) = resolve_provider(&state, &model_id).await?;
+    let (provider, provider_type, request_model) = resolve_provider(&state, &model_id).await?;
 
     let now = chrono_now();
 
@@ -344,7 +354,7 @@ pub async fn send_message(
             .with_conn(|conn| db::messages::update_text(conn, &user_message_id, &persisted_content))?;
     }
 
-    do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &channel, common_params, provider_params).await
+    do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &request_model, &channel, common_params, provider_params).await
 }
 
 #[tauri::command]
@@ -356,9 +366,9 @@ pub async fn resend_message(
     common_params: Option<CommonParams>,
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
-    let (provider, provider_type) = resolve_provider(&state, &model_id).await?;
+    let (provider, provider_type, request_model) = resolve_provider(&state, &model_id).await?;
 
-    do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &channel, common_params, provider_params).await
+    do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &request_model, &channel, common_params, provider_params).await
 }
 
 /// Generate a new version of an AI response (+1 button).
@@ -372,7 +382,7 @@ pub async fn generate_version(
     common_params: Option<CommonParams>,
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
-    let (provider, provider_type) = resolve_provider(&state, &model_id).await?;
+    let (provider, provider_type, request_model) = resolve_provider(&state, &model_id).await?;
 
     // 1. Initialize version group if needed
     state
@@ -447,7 +457,7 @@ pub async fn generate_version(
         &state,
         provider,
         &provider_type,
-        &model_id,
+        &request_model,
         &new_msg_id,
         &conversation_id,
         history,
@@ -469,7 +479,7 @@ pub async fn regenerate_message(
     common_params: Option<CommonParams>,
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
-    let (provider, provider_type) = resolve_provider(&state, &model_id).await?;
+    let (provider, provider_type, request_model) = resolve_provider(&state, &model_id).await?;
 
     // Get version info
     let version_group_id: Option<String> = state.db.with_conn(|conn| {
@@ -507,7 +517,7 @@ pub async fn regenerate_message(
         &state,
         provider,
         &provider_type,
-        &model_id,
+        &request_model,
         &message_id,
         &conversation_id,
         history,
@@ -526,7 +536,7 @@ pub async fn compress_conversation(
     model_id: String,
     channel: Channel<ChatEvent>,
 ) -> AppResult<Vec<Message>> {
-    let (provider, provider_type) = resolve_provider(&state, &model_id).await?;
+    let (provider, provider_type, request_model) = resolve_provider(&state, &model_id).await?;
 
     // Load all messages
     let history = state
@@ -553,7 +563,7 @@ pub async fn compress_conversation(
     }
 
     let request = ChatRequest {
-        model: model_id.to_string(),
+        model: request_model,
         messages: chat_messages,
         common: CommonParams {
             temperature: None,
@@ -645,10 +655,10 @@ pub async fn send_message_group(
     }
 
     // 1. Resolve all providers upfront (fail fast if any model is invalid)
-    let mut resolved: Vec<(Arc<dyn Provider>, String, String)> = Vec::new(); // (provider, provider_type, model_id)
+    let mut resolved: Vec<(Arc<dyn Provider>, String, String, String)> = Vec::new(); // (provider, provider_type, model_id, request_model)
     for mid in &model_ids {
-        let (provider, provider_type) = resolve_provider(&state, mid).await?;
-        resolved.push((provider, provider_type, mid.clone()));
+        let (provider, provider_type, request_model) = resolve_provider(&state, mid).await?;
+        resolved.push((provider, provider_type, mid.clone(), request_model));
     }
 
     let now = chrono_now();
@@ -758,7 +768,7 @@ pub async fn send_message_group(
     let mut join_set = tokio::task::JoinSet::new();
     let first_finished = std::sync::Arc::new(std::sync::Mutex::new(Option::<String>::None));
 
-    for (i, (provider, provider_type, model_id)) in resolved.into_iter().enumerate() {
+    for (i, (provider, provider_type, _model_id, request_model)) in resolved.into_iter().enumerate() {
         let msg_id = assistant_msg_ids[i].clone();
         let state_clone = state.inner().clone();
         let channel_clone = channel.clone();
@@ -777,7 +787,7 @@ pub async fn send_message_group(
 
         join_set.spawn(async move {
             let request = ChatRequest {
-                model: model_id.clone(),
+                model: request_model.clone(),
                 messages: request_messages,
                 common,
                 provider_params,
@@ -991,5 +1001,44 @@ mod tests {
         assert_eq!(messages[1].content, "summary: we discussed refactoring");
         assert_eq!(messages[2].role, Role::User);
         assert_eq!(messages[2].content, "continue from that plan");
+    }
+
+    #[test]
+    fn resolve_model_request_uses_stored_request_name() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE providers (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              type TEXT NOT NULL,
+              api_key TEXT,
+              base_url TEXT,
+              is_enabled INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE models (
+              id TEXT PRIMARY KEY,
+              provider_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              display_name TEXT,
+              max_tokens INTEGER,
+              is_vision INTEGER NOT NULL DEFAULT 0,
+              supports_thinking INTEGER NOT NULL DEFAULT 0,
+              is_enabled INTEGER NOT NULL DEFAULT 1,
+              source TEXT NOT NULL DEFAULT 'synced'
+            );
+            INSERT INTO providers (id, name, type, base_url, is_enabled)
+            VALUES ('p1', 'Provider', 'openai_compat', 'https://example.com/v1', 1);
+            INSERT INTO models (id, provider_id, name, display_name, is_enabled, source)
+            VALUES ('local-uuid-1', 'p1', 'gpt-4.1', 'Friendly GPT', 1, 'manual');
+            ",
+        )
+        .unwrap();
+
+        let resolved = resolve_model_request(&conn, "local-uuid-1").unwrap();
+        assert_eq!(resolved.provider_id, "p1");
+        assert_eq!(resolved.provider_type, "openai_compat");
+        assert_eq!(resolved.request_model, "gpt-4.1");
+        assert_ne!(resolved.request_model, "local-uuid-1");
     }
 }

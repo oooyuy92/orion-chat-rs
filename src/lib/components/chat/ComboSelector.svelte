@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { ModelCombo, ModelGroup } from '$lib/types';
+  import { resolveModelLabel } from '$lib/utils/modelDisplay';
   import { Popover, PopoverContent, PopoverTrigger } from '$lib/components/ui/popover';
   import { loadCombos } from '$lib/stores/modelCombos';
   import { i18n } from '$lib/stores/i18n.svelte';
@@ -33,9 +34,13 @@
   function resolveModelName(modelId: string): string {
     for (const group of modelGroups) {
       const model = group.models.find((m) => m.id === modelId);
-      if (model) return model.name;
+      if (model) return resolveModelLabel(model);
     }
     return modelId;
+  }
+
+  function resolveComboTitle(modelIds: string[]): string {
+    return modelIds.map(resolveModelName).join(', ');
   }
 
   function handleSelect(combo: ModelCombo) {
@@ -78,7 +83,11 @@
       {:else}
         <div class="combo-list">
           {#each combos as combo (combo.id)}
-            <button class="combo-item" onclick={() => handleSelect(combo)}>
+            <button
+              class="combo-item"
+              title={resolveComboTitle(combo.modelIds)}
+              onclick={() => handleSelect(combo)}
+            >
               <span class="combo-name">{combo.name}</span>
               <span class="combo-count">{combo.modelIds.length} models</span>
             </button>
