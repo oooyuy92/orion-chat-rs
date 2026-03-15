@@ -5,7 +5,7 @@
   import { api } from '$lib/utils/invoke';
   import { groupConversationsByTime } from '$lib/utils/date';
   import { i18n, type ConversationGroupKey } from '$lib/stores/i18n.svelte';
-  import { titleUpdates, assistantUpdates } from '$lib/stores/conversations';
+  import { titleUpdates, assistantUpdates, conversationCreated, streamingConversations } from '$lib/stores/conversations';
   import {
     SidebarGroup,
     SidebarGroupLabel,
@@ -41,6 +41,12 @@
   let searchResults = $state<SearchResultView[]>([]);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
   let searchRequestId = 0;
+  let streamingIds = $state<Set<string>>(new Set());
+
+  $effect(() => {
+    const unsub = streamingConversations.subscribe((ids) => { streamingIds = ids; });
+    return unsub;
+  });
 
   const pinned = $derived(conversations.filter((c) => c.isPinned));
   const unpinned = $derived(conversations.filter((c) => !c.isPinned));
@@ -66,6 +72,16 @@
       conversations = conversations.map((c) =>
         c.id === upd.id ? { ...c, assistantId: upd.assistantId } : c,
       );
+    });
+    return unsub;
+  });
+
+  $effect(() => {
+    const unsub = conversationCreated.subscribe((conv) => {
+      if (!conv) return;
+      if (!conversations.some((c) => c.id === conv.id)) {
+        conversations = [conv, ...conversations];
+      }
     });
     return unsub;
   });
@@ -325,13 +341,17 @@
 
   async function handleDelete(id: string) {
     closeContextMenu();
+    // Optimistic: remove from UI immediately
+    const previous = conversations;
+    conversations = conversations.filter((c) => c.id !== id);
+    searchResults = searchResults.filter((result) => result.conversationId !== id);
+    if (activeId === id) activeId = '';
     try {
       await api.deleteConversation(id);
-      conversations = conversations.filter((c) => c.id !== id);
-      searchResults = searchResults.filter((result) => result.conversationId !== id);
-      if (activeId === id) activeId = '';
     } catch (e) {
       console.error(e);
+      // Rollback on failure
+      conversations = previous;
     }
   }
 
@@ -418,6 +438,11 @@
         />
         <span class="conversation-title muted">{conversation.title}</span>
       {:else}
+        {#if streamingIds.has(conversation.id)}
+          <svg class="streaming-indicator" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+          </svg>
+        {/if}
         <div class="conversation-main">
           <div class="conversation-title-row">
             {#if conversation.isPinned}
@@ -669,6 +694,17 @@
     flex-shrink: 0;
     opacity: 0.5;
     color: var(--muted-foreground);
+  }
+
+  .streaming-indicator {
+    flex-shrink: 0;
+    color: hsl(var(--primary));
+    animation: spin 1.2s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
   .prefix-tag {

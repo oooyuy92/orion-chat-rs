@@ -76,6 +76,23 @@ fn ensure_assistant_exists(
     Ok(())
 }
 
+fn ensure_model_exists(
+    conn: &Connection,
+    model_id: Option<&str>,
+) -> AppResult<()> {
+    if let Some(model_id) = model_id {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM models WHERE id = ?1)",
+            [model_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(AppError::NotFound(format!("Model {model_id}")));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_conversation_assistant_can_change(
     conn: &Connection,
     conversation_id: &str,
@@ -165,6 +182,19 @@ pub async fn update_conversation_assistant(
         ensure_assistant_exists(conn, assistant_id.as_deref())?;
         ensure_conversation_assistant_can_change(conn, &id)?;
         db::conversations::update_assistant(conn, &id, assistant_id.as_deref())
+    })
+}
+
+#[tauri::command]
+pub async fn update_conversation_model(
+    state: State<'_, Arc<AppState>>,
+    id: String,
+    model_id: Option<String>,
+) -> AppResult<()> {
+    state.db.with_conn(|conn| {
+        db::conversations::get(conn, &id)?;
+        ensure_model_exists(conn, model_id.as_deref())?;
+        db::conversations::update_model(conn, &id, model_id.as_deref())
     })
 }
 
@@ -473,6 +503,74 @@ pub async fn get_version_models(
         .with_conn(|conn| db::messages::get_version_models(conn, &version_group_id))
 }
 
+#[tauri::command]
+pub async fn fork_conversation(
+    state: State<'_, Arc<AppState>>,
+    source_conversation_id: String,
+    up_to_message_id: String,
+) -> AppResult<Conversation> {
+    let now = super::chat::chrono_now();
+
+    // 1. Get source conversation
+    let source = state
+        .db
+        .with_conn(|conn| db::conversations::get(conn, &source_conversation_id))?;
+
+    // 2. Create new conversation with " 副本" suffix
+    let new_conv = Conversation {
+        id: uuid::Uuid::new_v4().to_string(),
+        title: format!("{} 副本", source.title),
+        assistant_id: source.assistant_id.clone(),
+        model_id: source.model_id.clone(),
+        is_pinned: false,
+        sort_order: 0,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    state
+        .db
+        .with_conn(|conn| db::conversations::create(conn, &new_conv))?;
+
+    // 3. Get all messages from source conversation
+    let all_messages = state
+        .db
+        .with_conn(|conn| db::messages::list_by_conversation(conn, &source_conversation_id))?;
+
+    // 4. Find up_to_message_id position and copy messages up to (and including) it
+    let cut_idx = all_messages
+        .iter()
+        .position(|m| m.id == up_to_message_id)
+        .ok_or_else(|| {
+            AppError::NotFound(format!("Message {up_to_message_id}"))
+        })?;
+
+    let messages_to_copy = &all_messages[..=cut_idx];
+
+    // 5. Insert copies into new conversation
+    state.db.with_conn(|conn| {
+        for msg in messages_to_copy {
+            let new_msg = Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                conversation_id: new_conv.id.clone(),
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                model_id: msg.model_id.clone(),
+                reasoning: msg.reasoning.clone(),
+                token_count: msg.token_count,
+                status: MessageStatus::Done,
+                created_at: msg.created_at.clone(),
+                version_group_id: None,
+                version_number: 1,
+                total_versions: 1,
+            };
+            db::messages::create(conn, &new_msg)?;
+        }
+        Ok(())
+    })?;
+
+    Ok(new_conv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +661,20 @@ mod tests {
             .with_conn(|conn| {
                 db::conversations::create(conn, &make_conversation("conv-1"))?;
                 ensure_assistant_exists(conn, Some("missing-assistant"))
+            })
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_binding_rejected_for_unknown_model() {
+        let db = Database::new(":memory:").unwrap();
+
+        let err = db
+            .with_conn(|conn| {
+                db::conversations::create(conn, &make_conversation("conv-1"))?;
+                ensure_model_exists(conn, Some("missing-model"))
             })
             .unwrap_err();
 

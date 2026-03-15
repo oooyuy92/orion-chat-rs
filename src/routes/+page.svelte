@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { load as loadStore } from '@tauri-apps/plugin-store';
-  import { SidebarProvider, SidebarInset } from '$lib/components/ui/sidebar';
+  import { SidebarProvider, SidebarInset, SidebarTrigger } from '$lib/components/ui/sidebar';
   import AppSidebar from '$lib/components/sidebar/AppSidebar.svelte';
   import ChatArea from '$lib/components/chat/ChatArea.svelte';
   import { api } from '$lib/utils/invoke';
-  import { titleUpdates, assistantUpdates } from '$lib/stores/conversations';
+  import { titleUpdates, assistantUpdates, conversationCreated, streamingConversations } from '$lib/stores/conversations';
   import { getModelParams } from '$lib/stores/modelParams';
   import type { ChatEvent } from '$lib/utils/invoke';
   import type { Assistant, Conversation, Message, ModelGroup, ProviderType } from '$lib/types';
@@ -21,13 +21,33 @@
   const pageSize = 100;
   let hasMoreMessages = $state(false);
   let isLoadingMoreMessages = $state(false);
-  let isStreaming = $state(false);
+  let streamingConvIds = $state<Set<string>>(new Set());
+  const isStreaming = $derived(streamingConvIds.has(activeConversationId));
   let streamingMessageId = $state('');
   let currentModelId = $state('');
   let modelGroups = $state<ModelGroup[]>([]);
   let assistants = $state<Assistant[]>([]);
   let conversations = $state<Conversation[]>([]);
   let pendingFocusMessageId = $state<string | null>(null);
+
+  function markStreaming(convId: string) {
+    streamingConvIds = new Set([...streamingConvIds, convId]);
+    streamingConversations.set(streamingConvIds);
+  }
+  function unmarkStreaming(convId: string) {
+    const next = new Set(streamingConvIds);
+    next.delete(convId);
+    streamingConvIds = next;
+    streamingConversations.set(streamingConvIds);
+  }
+
+  type ConvCache = {
+    messages: Message[];
+    streamingMessageId: string;
+    groupStreamingMessages: Message[];
+    lastPromptTokens: number;
+  };
+  let messageCache = new Map<string, ConvCache>();
 
   const currentConversation = $derived(
     conversations.find((conversation) => conversation.id === activeConversationId) ?? null,
@@ -52,6 +72,7 @@
   let autoCompressThreshold = $state(50000);
   let lastPromptTokens = $state(0);
   let isCompressing = $state(false);
+  let forkedBannerVisible = $state(false);
 
   async function loadAutoRenameSettings() {
     try {
@@ -102,15 +123,19 @@
       const newMessages = await api.compressConversation(
         conversationId,
         autoCompressModelId,
-        handleEvent,
+        (event) => handleEventFor(conversationId, event),
       );
-      messages = newMessages;
-      hasMoreMessages = false;
-      isLoadingMoreMessages = false;
-      lastPromptTokens = 0;
+      if (conversationId === activeConversationId) {
+        messages = newMessages;
+        hasMoreMessages = false;
+        isLoadingMoreMessages = false;
+        lastPromptTokens = 0;
+      }
     } catch (e) {
       console.error('Auto-compress failed:', e);
-      await loadLatestMessages(conversationId);
+      if (conversationId === activeConversationId) {
+        await loadLatestMessages(conversationId);
+      }
     } finally {
       isCompressing = false;
     }
@@ -131,10 +156,10 @@
         }))
         .filter((group) => group.models.length > 0);
 
-      // Set default model if none selected
-      const allModels = modelGroups.flatMap((g) => g.models);
-      if (allModels.length > 0 && !currentModelId) {
-        currentModelId = allModels[0].id;
+      if (activeConversationId) {
+        syncCurrentModelToConversation();
+      } else if (!currentModelId) {
+        currentModelId = getFirstAvailableModelId();
       }
     } catch (e) {
       console.error('Failed to load models:', e);
@@ -144,7 +169,7 @@
   async function loadAssistants() {
     try {
       assistants = await api.listAssistants();
-      syncCurrentModelToAssistantBinding();
+      syncCurrentModelToConversation();
     } catch (e) {
       console.error('Failed to load assistants:', e);
       assistants = [];
@@ -154,23 +179,84 @@
   async function loadConversations() {
     try {
       conversations = await api.listConversations();
+      if (activeConversationId) {
+        const conversation = conversations.find((item) => item.id === activeConversationId) ?? null;
+        syncCurrentModelToConversation(conversation);
+      }
     } catch (e) {
       console.error('Failed to load conversations:', e);
       conversations = [];
     }
   }
 
-  function syncCurrentModelToAssistantBinding(assistantId: string | null | undefined = currentConversation?.assistantId) {
+  function isAvailableModelId(modelId: string | null | undefined): modelId is string {
+    return !!modelId && modelGroups.some((group) => group.models.some((model) => model.id === modelId));
+  }
+
+  function getFirstAvailableModelId(): string {
+    return modelGroups.flatMap((group) => group.models)[0]?.id ?? '';
+  }
+
+  function resolveAssistantDefaultModelId(assistantId: string | null | undefined): string | null {
     const assistant = assistants.find((item) => item.id === assistantId);
-    if (assistant?.modelId) {
-      currentModelId = assistant.modelId;
+    return isAvailableModelId(assistant?.modelId) ? assistant.modelId : null;
+  }
+
+  function resolveConversationModelId(conversation: Conversation | null | undefined = currentConversation): string {
+    if (isAvailableModelId(conversation?.modelId)) {
+      return conversation.modelId;
+    }
+    const assistantModelId = resolveAssistantDefaultModelId(conversation?.assistantId);
+    if (assistantModelId) {
+      return assistantModelId;
+    }
+    return getFirstAvailableModelId();
+  }
+
+  function syncCurrentModelToConversation(conversation: Conversation | null | undefined = currentConversation) {
+    const nextModelId = resolveConversationModelId(conversation);
+    if (nextModelId) {
+      currentModelId = nextModelId;
+    }
+  }
+
+  function updateLocalConversationModel(conversationId: string, modelId: string | null) {
+    conversations = conversations.map((conversation) =>
+      conversation.id === conversationId
+        ? { ...conversation, modelId }
+        : conversation,
+    );
+  }
+
+  async function persistConversationModel(conversationId: string, modelId: string | null) {
+    const previousModelId =
+      conversations.find((conversation) => conversation.id === conversationId)?.modelId ?? null;
+    updateLocalConversationModel(conversationId, modelId);
+    try {
+      await api.updateConversationModel(conversationId, modelId);
+    } catch (e) {
+      updateLocalConversationModel(conversationId, previousModelId);
+      throw e;
     }
   }
 
   async function refreshConversationState(conversationId: string) {
     await loadConversations();
     const conversation = conversations.find((item) => item.id === conversationId) ?? null;
-    syncCurrentModelToAssistantBinding(conversation?.assistantId);
+    syncCurrentModelToConversation(conversation);
+  }
+
+  async function handleModelSelect(modelId: string) {
+    const previousModelId = resolveConversationModelId(currentConversation);
+    currentModelId = modelId;
+    if (!activeConversationId) return;
+    try {
+      await persistConversationModel(activeConversationId, modelId);
+    } catch (e) {
+      console.error('Failed to update conversation model:', e);
+      currentModelId = previousModelId;
+      await refreshConversationState(activeConversationId);
+    }
   }
 
   function handleUndoKeydown(e: KeyboardEvent) {
@@ -226,16 +312,53 @@ async function loadMessagesUntilFocused(conversationId: string, messageId: strin
 }
 
 function handleConversationSelect(selection: ConversationSelection) {
+  // Always save current conversation state if it's streaming (or has a background cache)
+  if (streamingConvIds.has(activeConversationId)) {
+    messageCache.set(activeConversationId, {
+      messages: [...messages],
+      streamingMessageId,
+      groupStreamingMessages: [...groupStreamingMessages],
+      lastPromptTokens,
+    });
+  }
+
   invalidateRestore();
   activeConversationId = selection.conversationId;
-  pendingFocusMessageId = selection.messageId ?? null;
-  void refreshConversationState(selection.conversationId);
-  void (async () => {
-    await loadLatestMessages(selection.conversationId);
-    if (selection.messageId) {
-      await loadMessagesUntilFocused(selection.conversationId, selection.messageId);
+  syncCurrentModelToConversation(
+    conversations.find((conversation) => conversation.id === selection.conversationId) ?? null,
+  );
+
+  // Restore target conversation from cache (streaming or finished-in-background)
+  const cached = messageCache.get(selection.conversationId);
+  if (cached) {
+    messages = cached.messages;
+    streamingMessageId = cached.streamingMessageId;
+    groupStreamingMessages = cached.groupStreamingMessages;
+    lastPromptTokens = cached.lastPromptTokens;
+    // If no longer streaming, clean up cache and reload from DB to sync
+    if (!streamingConvIds.has(selection.conversationId)) {
+      messageCache.delete(selection.conversationId);
+      // Async reload to get DB-synced state (cache gives instant display)
+      void (async () => {
+        await loadLatestMessages(selection.conversationId);
+      })();
     }
-  })();
+    pendingFocusMessageId = selection.messageId ?? null;
+    void refreshConversationState(selection.conversationId);
+  } else {
+    // No cache — clear messages immediately to avoid showing stale data
+    messages = [];
+    groupStreamingMessages = [];
+    streamingMessageId = '';
+    pendingFocusMessageId = selection.messageId ?? null;
+    void refreshConversationState(selection.conversationId);
+    void (async () => {
+      await loadLatestMessages(selection.conversationId);
+      if (selection.messageId) {
+        await loadMessagesUntilFocused(selection.conversationId, selection.messageId);
+      }
+    })();
+  }
 }
 
   async function handleAssistantSelect(assistantId: string | null) {
@@ -243,6 +366,7 @@ function handleConversationSelect(selection: ConversationSelection) {
 
     const currentAssistantId = currentConversation?.assistantId ?? null;
     if (currentAssistantId === assistantId) return;
+    const assistantModelId = resolveAssistantDefaultModelId(assistantId);
 
     try {
       await api.updateConversationAssistant(activeConversationId, assistantId);
@@ -252,7 +376,14 @@ function handleConversationSelect(selection: ConversationSelection) {
           : conversation,
       );
       assistantUpdates.set({ id: activeConversationId, assistantId });
-      syncCurrentModelToAssistantBinding(assistantId);
+      if (assistantModelId) {
+        currentModelId = assistantModelId;
+        await persistConversationModel(activeConversationId, assistantModelId);
+      } else {
+        syncCurrentModelToConversation(
+          conversations.find((conversation) => conversation.id === activeConversationId) ?? null,
+        );
+      }
     } catch (e) {
       console.error('Failed to update conversation assistant:', e);
       await refreshConversationState(activeConversationId);
@@ -269,11 +400,14 @@ function handleConversationSelect(selection: ConversationSelection) {
 
     try {
       const page = await api.getMessages(conversationId, { limit: pageSize });
+      // Guard: only update if still viewing this conversation
+      if (conversationId !== activeConversationId) return;
       messages = page.messages;
       hasMoreMessages = page.hasMore;
       isLoadingMoreMessages = false;
     } catch (e) {
       console.error('Failed to load messages:', e);
+      if (conversationId !== activeConversationId) return;
       messages = [];
       hasMoreMessages = false;
       isLoadingMoreMessages = false;
@@ -307,70 +441,106 @@ function handleConversationSelect(selection: ConversationSelection) {
     }
   }
 
-  function handleEvent(event: ChatEvent) {
+  function getMessages(convId: string): Message[] {
+    return convId === activeConversationId
+      ? messages
+      : (messageCache.get(convId)?.messages ?? []);
+  }
+
+  function setMessages(convId: string, msgs: Message[]) {
+    if (convId === activeConversationId) {
+      messages = msgs;
+    } else {
+      const cached = messageCache.get(convId);
+      if (cached) cached.messages = msgs;
+    }
+  }
+
+  function handleEventFor(convId: string, event: ChatEvent) {
+    const msgs = getMessages(convId);
     switch (event.type) {
       case 'started':
-        streamingMessageId = event.messageId;
+        if (convId === activeConversationId) streamingMessageId = event.messageId;
         break;
       case 'delta': {
-        const idx = messages.findIndex((m) => m.id === event.messageId);
+        const idx = msgs.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
-          messages[idx] = {
-            ...messages[idx],
-            content: messages[idx].content + event.content,
-          };
+          const updated = [...msgs];
+          updated[idx] = { ...updated[idx], content: updated[idx].content + event.content };
+          setMessages(convId, updated);
         }
         break;
       }
       case 'reasoning': {
-        const idx = messages.findIndex((m) => m.id === event.messageId);
+        const idx = msgs.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
-          messages[idx] = {
-            ...messages[idx],
-            reasoning: (messages[idx].reasoning ?? '') + event.content,
-          };
+          const updated = [...msgs];
+          updated[idx] = { ...updated[idx], reasoning: (updated[idx].reasoning ?? '') + event.content };
+          setMessages(convId, updated);
         }
         break;
       }
       case 'usage': {
-        const idx = messages.findIndex((m) => m.id === event.messageId);
+        const idx = msgs.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
-          messages[idx] = {
-            ...messages[idx],
-            tokenCount: event.promptTokens + event.completionTokens,
-          };
+          const updated = [...msgs];
+          updated[idx] = { ...updated[idx], tokenCount: event.promptTokens + event.completionTokens };
+          setMessages(convId, updated);
         }
-        lastPromptTokens = event.promptTokens;
+        if (convId === activeConversationId) lastPromptTokens = event.promptTokens;
+        else {
+          const cached = messageCache.get(convId);
+          if (cached) cached.lastPromptTokens = event.promptTokens;
+        }
         break;
       }
       case 'finished': {
-        const idx = messages.findIndex((m) => m.id === event.messageId);
+        const idx = msgs.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
-          messages[idx] = { ...messages[idx], status: 'done' };
+          const updated = [...msgs];
+          updated[idx] = { ...updated[idx], status: 'done' };
+          setMessages(convId, updated);
         }
-        isStreaming = false;
-        streamingMessageId = '';
+        unmarkStreaming(convId);
+        // Only delete cache if this is the active conversation;
+        // keep it for background conversations so we can restore on switch-back
+        if (convId === activeConversationId) {
+          messageCache.delete(convId);
+          streamingMessageId = '';
+        }
         // Check if auto-compress needed
-        if (autoCompress && autoCompressModelId && lastPromptTokens > autoCompressThreshold) {
-          void tryAutoCompress(activeConversationId);
+        const tokens = convId === activeConversationId
+          ? lastPromptTokens
+          : (messageCache.get(convId)?.lastPromptTokens ?? 0);
+        if (autoCompress && autoCompressModelId && tokens > autoCompressThreshold) {
+          void tryAutoCompress(convId);
         }
         break;
       }
       case 'error': {
         console.error('Stream error:', event.message);
-        const idx = messages.findIndex((m) => m.id === event.messageId);
+        const idx = msgs.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
-          messages[idx] = {
-            ...messages[idx],
+          const updated = [...msgs];
+          updated[idx] = {
+            ...updated[idx],
             status: 'error',
-            content: messages[idx].content || event.message,
+            content: updated[idx].content || event.message,
           };
+          setMessages(convId, updated);
         }
-        isStreaming = false;
-        streamingMessageId = '';
+        unmarkStreaming(convId);
+        if (convId === activeConversationId) {
+          messageCache.delete(convId);
+          streamingMessageId = '';
+        }
         break;
       }
     }
+  }
+
+  function handleEvent(event: ChatEvent) {
+    handleEventFor(activeConversationId, event);
   }
 
   async function handleRestore() {
@@ -392,10 +562,12 @@ function handleConversationSelect(selection: ConversationSelection) {
       return;
     }
 
+    const convId = activeConversationId;
+
     // Optimistic user message
     const userMsg: Message = {
       id: crypto.randomUUID(),
-      conversationId: activeConversationId,
+      conversationId: convId,
       role: 'user',
       content,
       reasoning: null,
@@ -412,7 +584,7 @@ function handleConversationSelect(selection: ConversationSelection) {
     // Placeholder assistant message
     const assistantMsg: Message = {
       id: crypto.randomUUID(),
-      conversationId: activeConversationId,
+      conversationId: convId,
       role: 'assistant',
       content: '',
       reasoning: null,
@@ -426,45 +598,54 @@ function handleConversationSelect(selection: ConversationSelection) {
     };
     messages = [...messages, assistantMsg];
     streamingMessageId = assistantMsg.id;
-    isStreaming = true;
+    markStreaming(convId);
 
     try {
       const params = await loadParamsForModel(currentModelId);
       await api.sendMessage(
-        activeConversationId,
+        convId,
         content,
         currentModelId,
         (event) => {
           // Update the streaming message ID to the real one from backend
           if (event.type === 'started') {
-            const idx = messages.findIndex((m) => m.id === assistantMsg.id);
+            const msgs = getMessages(convId);
+            const idx = msgs.findIndex((m) => m.id === assistantMsg.id);
             if (idx !== -1) {
-              messages[idx] = { ...messages[idx], id: event.messageId };
+              const updated = [...msgs];
+              updated[idx] = { ...updated[idx], id: event.messageId };
+              setMessages(convId, updated);
             }
-            streamingMessageId = event.messageId;
+            if (convId === activeConversationId) streamingMessageId = event.messageId;
           } else {
-            handleEvent(event);
+            handleEventFor(convId, event);
           }
         },
         params.common,
         params.providerParams,
       );
-      // Reload messages from DB to sync IDs (optimistic user msg has frontend-generated ID)
-      await loadLatestMessages(activeConversationId);
+      // Reload messages from DB to sync IDs (only if still active)
+      if (convId === activeConversationId) {
+        await loadLatestMessages(convId);
+      }
       // Trigger auto-rename based on message count
-      void tryAutoRename(activeConversationId, messages.length);
+      const msgCount = getMessages(convId).length;
+      void tryAutoRename(convId, msgCount);
     } catch (e) {
       console.error('Failed to send message:', e);
-      const idx = messages.findIndex((m) => m.id === assistantMsg.id || m.id === streamingMessageId);
+      const msgs = getMessages(convId);
+      const idx = msgs.findIndex((m) => m.id === assistantMsg.id || m.id === streamingMessageId);
       if (idx !== -1) {
-        messages[idx] = {
-          ...messages[idx],
+        const updated = [...msgs];
+        updated[idx] = {
+          ...updated[idx],
           status: 'error',
-          content: messages[idx].content || String(e),
+          content: updated[idx].content || String(e),
         };
+        setMessages(convId, updated);
       }
-      isStreaming = false;
-      streamingMessageId = '';
+      unmarkStreaming(convId);
+      if (convId === activeConversationId) streamingMessageId = '';
     }
   }
 
@@ -475,7 +656,7 @@ function handleConversationSelect(selection: ConversationSelection) {
   async function handleStop() {
     if (!isStreaming) return;
     try {
-      await api.stopGeneration();
+      await api.stopGeneration(activeConversationId);
     } catch (e) {
       console.error('Failed to stop generation:', e);
     }
@@ -503,10 +684,12 @@ function handleConversationSelect(selection: ConversationSelection) {
     invalidateRestore();
     if (!activeConversationId || !currentModelId) return;
 
+    const convId = activeConversationId;
+
     try {
       // Delete all messages after this one on backend
       console.log('[+page] Calling deleteMessagesAfter...');
-      await api.deleteMessagesAfter(activeConversationId, messageId);
+      await api.deleteMessagesAfter(convId, messageId);
 
       // Truncate local messages
       const idx = messages.findIndex((m) => m.id === messageId);
@@ -517,7 +700,7 @@ function handleConversationSelect(selection: ConversationSelection) {
       // Create optimistic assistant placeholder
       const assistantMsg: Message = {
         id: crypto.randomUUID(),
-        conversationId: activeConversationId,
+        conversationId: convId,
         role: 'assistant',
         content: '',
         reasoning: null,
@@ -531,22 +714,25 @@ function handleConversationSelect(selection: ConversationSelection) {
       };
       messages = [...messages, assistantMsg];
       streamingMessageId = assistantMsg.id;
-      isStreaming = true;
+      markStreaming(convId);
 
       console.log('[+page] Calling resendMessage...');
       const params = await loadParamsForModel(currentModelId);
       await api.resendMessage(
-        activeConversationId,
+        convId,
         currentModelId,
         (event) => {
           if (event.type === 'started') {
-            const i = messages.findIndex((m) => m.id === assistantMsg.id);
+            const msgs = getMessages(convId);
+            const i = msgs.findIndex((m) => m.id === assistantMsg.id);
             if (i !== -1) {
-              messages[i] = { ...messages[i], id: event.messageId };
+              const updated = [...msgs];
+              updated[i] = { ...updated[i], id: event.messageId };
+              setMessages(convId, updated);
             }
-            streamingMessageId = event.messageId;
+            if (convId === activeConversationId) streamingMessageId = event.messageId;
           } else {
-            handleEvent(event);
+            handleEventFor(convId, event);
           }
         },
         params.common,
@@ -555,7 +741,7 @@ function handleConversationSelect(selection: ConversationSelection) {
       console.log('[+page] resendMessage completed');
     } catch (e) {
       console.error('Failed to resend:', e);
-      isStreaming = false;
+      unmarkStreaming(convId);
     }
   }
 
@@ -605,13 +791,15 @@ function handleConversationSelect(selection: ConversationSelection) {
   async function doResendAllVersions(userMessageId: string, versionModels: [number, string][]) {
     if (!activeConversationId) return;
 
+    const convId = activeConversationId;
+
     // Sort by version number
     versionModels.sort((a, b) => a[0] - b[0]);
     const firstModel = versionModels[0][1];
 
     try {
       // Delete all messages after the user message
-      await api.deleteMessagesAfter(activeConversationId, userMessageId);
+      await api.deleteMessagesAfter(convId, userMessageId);
 
       // Truncate local messages
       const idx = messages.findIndex((m) => m.id === userMessageId);
@@ -621,7 +809,7 @@ function handleConversationSelect(selection: ConversationSelection) {
       // Generate first version via resendMessage
       const assistantMsg: Message = {
         id: crypto.randomUUID(),
-        conversationId: activeConversationId,
+        conversationId: convId,
         role: 'assistant',
         content: '',
         reasoning: null,
@@ -635,24 +823,27 @@ function handleConversationSelect(selection: ConversationSelection) {
       };
       messages = [...messages, assistantMsg];
       streamingMessageId = assistantMsg.id;
-      isStreaming = true;
+      markStreaming(convId);
 
       let firstRealId = '';
 
       const firstParams = await loadParamsForModel(firstModel);
       await api.resendMessage(
-        activeConversationId,
+        convId,
         firstModel,
         (event) => {
           if (event.type === 'started') {
-            const i = messages.findIndex((m) => m.id === assistantMsg.id);
+            const msgs = getMessages(convId);
+            const i = msgs.findIndex((m) => m.id === assistantMsg.id);
             if (i !== -1) {
-              messages[i] = { ...messages[i], id: event.messageId };
+              const updated = [...msgs];
+              updated[i] = { ...updated[i], id: event.messageId };
+              setMessages(convId, updated);
             }
-            streamingMessageId = event.messageId;
+            if (convId === activeConversationId) streamingMessageId = event.messageId;
             firstRealId = event.messageId;
           } else {
-            handleEvent(event);
+            handleEventFor(convId, event);
           }
         },
         firstParams.common,
@@ -660,17 +851,20 @@ function handleConversationSelect(selection: ConversationSelection) {
       );
 
       // Reload to get the real message with proper IDs
-      await loadLatestMessages(activeConversationId);
+      if (convId === activeConversationId) {
+        await loadLatestMessages(convId);
+      }
 
       // Generate subsequent versions using generateVersion
       for (let i = 1; i < versionModels.length; i++) {
         const vModel = versionModels[i][1];
-        const currentAiMsg = messages.find((m) => m.id === firstRealId);
+        const currentMsgs = getMessages(convId);
+        const currentAiMsg = currentMsgs.find((m) => m.id === firstRealId);
         if (!currentAiMsg) break;
 
         const placeholder: Message = {
           id: crypto.randomUUID(),
-          conversationId: activeConversationId,
+          conversationId: convId,
           role: 'assistant',
           content: '',
           reasoning: null,
@@ -683,37 +877,45 @@ function handleConversationSelect(selection: ConversationSelection) {
           totalVersions: versionModels.length,
         };
 
-        const aiIdx = messages.findIndex((m) => m.id === currentAiMsg.id);
-        messages = [...messages.slice(0, aiIdx), placeholder, ...messages.slice(aiIdx + 1)];
-        streamingMessageId = placeholder.id;
-        isStreaming = true;
+        const aiIdx = currentMsgs.findIndex((m) => m.id === currentAiMsg.id);
+        const updated = [...currentMsgs.slice(0, aiIdx), placeholder, ...currentMsgs.slice(aiIdx + 1)];
+        setMessages(convId, updated);
+        if (convId === activeConversationId) streamingMessageId = placeholder.id;
+        markStreaming(convId);
 
         const vParams = await loadParamsForModel(vModel);
         await api.generateVersion(
-          activeConversationId,
+          convId,
           firstRealId,
           vModel,
           (event) => {
             if (event.type === 'started') {
-              const j = messages.findIndex((m) => m.id === placeholder.id);
+              const msgs = getMessages(convId);
+              const j = msgs.findIndex((m) => m.id === placeholder.id);
               if (j !== -1) {
-                messages[j] = { ...messages[j], id: event.messageId };
+                const upd = [...msgs];
+                upd[j] = { ...upd[j], id: event.messageId };
+                setMessages(convId, upd);
               }
-              streamingMessageId = event.messageId;
+              if (convId === activeConversationId) streamingMessageId = event.messageId;
             } else {
-              handleEvent(event);
+              handleEventFor(convId, event);
             }
           },
           vParams.common,
           vParams.providerParams,
         );
 
-        await loadLatestMessages(activeConversationId);
+        if (convId === activeConversationId) {
+          await loadLatestMessages(convId);
+        }
       }
     } catch (e) {
       console.error('Failed to resend all versions:', e);
-      isStreaming = false;
-      await loadLatestMessages(activeConversationId);
+      unmarkStreaming(convId);
+      if (convId === activeConversationId) {
+        await loadLatestMessages(convId);
+      }
     }
   }
 
@@ -722,6 +924,7 @@ function handleConversationSelect(selection: ConversationSelection) {
     invalidateRestore();
     if (!activeConversationId) return;
 
+    const convId = activeConversationId;
     const effectiveModelId = modelId || currentModelId;
     if (!effectiveModelId) return;
 
@@ -741,30 +944,33 @@ function handleConversationSelect(selection: ConversationSelection) {
       };
       messages = [...messages.slice(0, idx), placeholder];
       streamingMessageId = messageId;
-      isStreaming = true;
+      markStreaming(convId);
 
       const params = await loadParamsForModel(effectiveModelId);
       await api.regenerateMessage(
-        activeConversationId,
+        convId,
         messageId,
         effectiveModelId,
         (event) => {
           if (event.type === 'started') {
-            // The backend reuses the same message ID, so no ID swap needed
-            streamingMessageId = event.messageId;
+            if (convId === activeConversationId) streamingMessageId = event.messageId;
           } else {
-            handleEvent(event);
+            handleEventFor(convId, event);
           }
         },
         params.common,
         params.providerParams,
       );
 
-      await loadLatestMessages(activeConversationId);
+      if (convId === activeConversationId) {
+        await loadLatestMessages(convId);
+      }
     } catch (e) {
       console.error('Failed to regenerate:', e);
-      isStreaming = false;
-      await loadLatestMessages(activeConversationId);
+      unmarkStreaming(convId);
+      if (convId === activeConversationId) {
+        await loadLatestMessages(convId);
+      }
     }
   }
 
@@ -772,6 +978,8 @@ function handleConversationSelect(selection: ConversationSelection) {
     console.log('[+page] handleGenerateVersion called with messageId:', messageId);
     invalidateRestore();
     if (!activeConversationId || !currentModelId) return;
+
+    const convId = activeConversationId;
 
     try {
       // Find the current message to get its position
@@ -783,7 +991,7 @@ function handleConversationSelect(selection: ConversationSelection) {
       // Create streaming placeholder for the new version at same position
       const placeholder: Message = {
         id: crypto.randomUUID(),
-        conversationId: activeConversationId,
+        conversationId: convId,
         role: 'assistant',
         content: '',
         reasoning: null,
@@ -799,33 +1007,40 @@ function handleConversationSelect(selection: ConversationSelection) {
       // Replace current message with placeholder, remove everything after
       messages = [...messages.slice(0, idx), placeholder, ...messages.slice(idx + 1)];
       streamingMessageId = placeholder.id;
-      isStreaming = true;
+      markStreaming(convId);
 
       const params = await loadParamsForModel(currentModelId);
       await api.generateVersion(
-        activeConversationId,
+        convId,
         messageId,
         currentModelId,
         (event) => {
           if (event.type === 'started') {
-            const i = messages.findIndex((m) => m.id === placeholder.id);
+            const msgs = getMessages(convId);
+            const i = msgs.findIndex((m) => m.id === placeholder.id);
             if (i !== -1) {
-              messages[i] = { ...messages[i], id: event.messageId };
+              const updated = [...msgs];
+              updated[i] = { ...updated[i], id: event.messageId };
+              setMessages(convId, updated);
             }
-            streamingMessageId = event.messageId;
+            if (convId === activeConversationId) streamingMessageId = event.messageId;
           } else {
-            handleEvent(event);
+            handleEventFor(convId, event);
           }
         },
         params.common,
         params.providerParams,
       );
 
-      await loadLatestMessages(activeConversationId);
+      if (convId === activeConversationId) {
+        await loadLatestMessages(convId);
+      }
     } catch (e) {
       console.error('Failed to generate version:', e);
-      isStreaming = false;
-      await loadLatestMessages(activeConversationId);
+      unmarkStreaming(convId);
+      if (convId === activeConversationId) {
+        await loadLatestMessages(convId);
+      }
     }
   }
 
@@ -843,10 +1058,12 @@ function handleConversationSelect(selection: ConversationSelection) {
     invalidateRestore();
     if (!activeConversationId) return;
 
+    const convId = activeConversationId;
+
     // Optimistic user message
     const userMsg: Message = {
       id: crypto.randomUUID(),
-      conversationId: activeConversationId,
+      conversationId: convId,
       role: 'user',
       content,
       reasoning: null,
@@ -864,7 +1081,7 @@ function handleConversationSelect(selection: ConversationSelection) {
     const now = new Date().toISOString();
     const placeholders: Message[] = modelIds.map((modelId, idx) => ({
       id: `placeholder-${idx}-${crypto.randomUUID()}`,
-      conversationId: activeConversationId,
+      conversationId: convId,
       role: 'assistant' as const,
       content: '',
       reasoning: null,
@@ -877,7 +1094,7 @@ function handleConversationSelect(selection: ConversationSelection) {
       totalVersions: modelIds.length,
     }));
     groupStreamingMessages = [...placeholders];
-    isStreaming = true;
+    markStreaming(convId);
 
     // Track mapping from placeholder index to real message IDs
     let startedCount = 0;
@@ -885,7 +1102,7 @@ function handleConversationSelect(selection: ConversationSelection) {
 
     try {
       await api.sendMessageGroup(
-        activeConversationId,
+        convId,
         content,
         modelIds,
         (event) => {
@@ -944,7 +1161,7 @@ function handleConversationSelect(selection: ConversationSelection) {
               }
               finishedCount++;
               if (finishedCount >= modelIds.length) {
-                isStreaming = false;
+                unmarkStreaming(convId);
               }
               break;
             case 'error':
@@ -958,26 +1175,47 @@ function handleConversationSelect(selection: ConversationSelection) {
               }
               finishedCount++;
               if (finishedCount >= modelIds.length) {
-                isStreaming = false;
+                unmarkStreaming(convId);
               }
               break;
           }
         },
       );
       // After all done, reload messages from DB
-      await loadLatestMessages(activeConversationId);
-      void tryAutoRename(activeConversationId, messages.length);
+      if (convId === activeConversationId) {
+        await loadLatestMessages(convId);
+      }
+      const msgCount = getMessages(convId).length;
+      void tryAutoRename(convId, msgCount);
     } catch (e) {
       console.error('Group send failed:', e);
-      isStreaming = false;
+      unmarkStreaming(convId);
       groupStreamingMessages = [];
-      await loadLatestMessages(activeConversationId);
+      if (convId === activeConversationId) {
+        await loadLatestMessages(convId);
+      }
     }
   }
 
   function handleExitGroupCompare() {
     groupStreamingMessages = [];
     void loadLatestMessages(activeConversationId);
+  }
+
+  async function handleFork(messageId: string) {
+    if (!activeConversationId) return;
+    try {
+      const newConv = await api.forkConversation(activeConversationId, messageId);
+      conversations = [newConv, ...conversations];
+      conversationCreated.set(newConv);
+      handleConversationSelect({ conversationId: newConv.id });
+      forkedBannerVisible = true;
+      setTimeout(() => {
+        forkedBannerVisible = false;
+      }, 4000);
+    } catch (e) {
+      console.error('Failed to fork conversation:', e);
+    }
   }
 
   function handleChatEvent(event: { type: string; [key: string]: any }) {
@@ -1013,18 +1251,27 @@ function handleConversationSelect(selection: ConversationSelection) {
       case 'stop':
         handleStop();
         break;
+      case 'fork':
+        handleFork(event.messageId);
+        break;
     }
   }
 </script>
 
 <SidebarProvider>
   <AppSidebar
-    bind:activeConversationId
+    {activeConversationId}
     onConversationSelect={handleConversationSelect}
   />
 
   <SidebarInset>
+    <div class="expand-sidebar-trigger-wrapper">
+      <SidebarTrigger />
+    </div>
     {#if activeConversationId}
+      {#if forkedBannerVisible}
+        <div class="fork-banner">{i18n.t.forkedBanner}</div>
+      {/if}
       <ChatArea
         conversationId={activeConversationId}
         {messages}
@@ -1038,6 +1285,7 @@ function handleConversationSelect(selection: ConversationSelection) {
         focusedMessageId={pendingFocusMessageId}
         {groupStreamingMessages}
         bind:selectedModelId={currentModelId}
+        onModelSelect={handleModelSelect}
         disabled={isStreaming || isCompressing}
         onAssistantSelect={handleAssistantSelect}
         onLoadOlderMessages={loadOlderMessages}
@@ -1050,3 +1298,25 @@ function handleConversationSelect(selection: ConversationSelection) {
     {/if}
   </SidebarInset>
 </SidebarProvider>
+
+<style>
+  .expand-sidebar-trigger-wrapper {
+    position: absolute;
+    top: 0.55rem;
+    left: 0.5rem;
+    z-index: 5;
+  }
+  :global([data-state="expanded"] ~ [data-slot="sidebar-inset"]) .expand-sidebar-trigger-wrapper {
+    display: none;
+  }
+
+  .fork-banner {
+    background: hsl(var(--primary) / 0.1);
+    color: hsl(var(--primary));
+    text-align: center;
+    padding: 0.5rem;
+    font-size: 0.82rem;
+    font-weight: 500;
+    flex-shrink: 0;
+  }
+</style>

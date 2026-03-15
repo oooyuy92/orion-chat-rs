@@ -97,6 +97,21 @@ pub fn update_assistant(
     Ok(())
 }
 
+pub fn update_model(
+    conn: &Connection,
+    id: &str,
+    model_id: Option<&str>,
+) -> AppResult<()> {
+    let changed = conn.execute(
+        "UPDATE conversations SET model_id = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![model_id, id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::NotFound(format!("Conversation {id}")));
+    }
+    Ok(())
+}
+
 pub fn update_pin(conn: &Connection, id: &str, is_pinned: bool) -> AppResult<()> {
     let changed = conn.execute(
         "UPDATE conversations SET is_pinned = ?1 WHERE id = ?2",
@@ -194,6 +209,45 @@ mod tests {
             update_assistant(conn, "conv-1", None)?;
             let fetched = get(conn, "conv-1")?;
             assert_eq!(fetched.assistant_id, None);
+
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_update_model_binding() {
+        let db = Database::new(":memory:").unwrap();
+
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO providers (id, name, type, is_enabled) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["provider-1", "OpenAI", "openai_compat", 1],
+            )?;
+            conn.execute(
+                "INSERT INTO models (id, provider_id, name, display_name) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params!["model-1", "provider-1", "gpt-4.1", "GPT-4.1"],
+            )?;
+
+            let conv = Conversation {
+                id: "conv-1".into(),
+                title: "Hello".into(),
+                assistant_id: None,
+                model_id: None,
+                is_pinned: false,
+                sort_order: 0,
+                created_at: "2025-01-01T00:00:00".into(),
+                updated_at: "2025-01-01T00:00:00".into(),
+            };
+            create(conn, &conv)?;
+
+            update_model(conn, "conv-1", Some("model-1"))?;
+            let fetched = get(conn, "conv-1")?;
+            assert_eq!(fetched.model_id.as_deref(), Some("model-1"));
+
+            update_model(conn, "conv-1", None)?;
+            let fetched = get(conn, "conv-1")?;
+            assert_eq!(fetched.model_id, None);
 
             Ok(())
         })

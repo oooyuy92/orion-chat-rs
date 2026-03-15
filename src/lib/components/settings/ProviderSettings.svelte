@@ -22,8 +22,6 @@
     | 'generalSettings'
     | 'displaySettings'
     | 'dataSettings'
-    | 'networkSearch'
-    | 'globalMemory'
     | 'quickPhrases'
     | 'shortcuts'
     | 'about';
@@ -50,10 +48,6 @@
         return isEn ? 'Display Settings' : '显示设置';
       case 'dataSettings':
         return isEn ? 'Data Settings' : '数据设置';
-      case 'networkSearch':
-        return isEn ? 'Web Search' : '网络搜索';
-      case 'globalMemory':
-        return isEn ? 'Global Memory' : '全局记忆';
       case 'quickPhrases':
         return isEn ? 'Quick Phrases' : '快捷短语';
       case 'shortcuts':
@@ -65,7 +59,7 @@
 
   const sectionGroups = $derived.by((): SectionGroup[] => [
     { title: navLabel('modelService'), items: ['modelService', 'assistants', 'modelCombos', 'generalSettings', 'displaySettings', 'dataSettings'] },
-    { title: language === 'en' ? 'MCP Servers' : 'MCP 服务器', items: ['networkSearch', 'globalMemory', 'quickPhrases', 'shortcuts'] },
+    { title: language === 'en' ? 'Quick Features' : '快捷功能', items: ['quickPhrases', 'shortcuts'] },
     { title: language === 'en' ? 'Other' : '其他', items: ['about'] },
   ]);
 
@@ -103,6 +97,7 @@
   let editingName = $state(false);
   let editNameInput = $state<HTMLInputElement | null>(null);
   let contextMenu = $state<{ x: number; y: number; providerId: string } | null>(null);
+  let modelContextMenu = $state<{ x: number; y: number; modelId: string } | null>(null);
   let modelSearch = $state('');
   let showAddModelDialog = $state(false);
   let creatingManualModel = $state(false);
@@ -880,7 +875,8 @@
       providers = providers.map((provider) =>
         provider.id === providerId ? { ...provider, models } : provider,
       );
-      success = language === 'zh' ? `模型同步成功，共 ${models.length} 个模型。` : `Model sync succeeded with ${models.length} models.`;
+      const syncedCount = models.filter((m: { source?: string }) => m.source !== 'manual').length;
+      success = language === 'zh' ? `模型同步成功，共 ${syncedCount} 个模型。` : `Model sync succeeded with ${syncedCount} models.`;
     } catch (e) {
       console.error('Failed to fetch models:', e);
       error = language === 'zh' ? `模型检测失败：${e}` : `Model check failed: ${e}`;
@@ -1118,6 +1114,36 @@
 
   function closeContextMenu() {
     contextMenu = null;
+    modelContextMenu = null;
+  }
+
+  function handleModelContextMenu(e: MouseEvent, modelId: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    modelContextMenu = { x: e.clientX, y: e.clientY, modelId };
+  }
+
+  async function handleDeleteManualModel() {
+    if (!modelContextMenu || !selectedProvider) return;
+    const modelId = modelContextMenu.modelId;
+    const model = selectedProvider.models.find((m) => m.id === modelId);
+    if (!model) return;
+
+    closeContextMenu();
+
+    error = '';
+    success = '';
+    try {
+      await api.deleteManualModel(modelId);
+      const pid = selectedProvider.id;
+      providers = providers.map((p) =>
+        p.id === pid ? { ...p, models: p.models.filter((m) => m.id !== modelId) } : p,
+      );
+      success = language === 'zh' ? '模型已删除。' : 'Model deleted.';
+    } catch (e) {
+      console.error('Failed to delete manual model:', e);
+      error = language === 'zh' ? `删除模型失败：${e}` : `Failed to delete model: ${e}`;
+    }
   }
 
   async function handleContextDelete() {
@@ -1426,6 +1452,7 @@
                   class:is-enabled={model.enabled}
                   disabled={!draftEnabled || updatingModels[model.id] || bulkUpdatingModels}
                   onclick={() => handleToggleModelVisibility(model.id, !model.enabled)}
+                  oncontextmenu={isManualModel(model) ? (e: MouseEvent) => handleModelContextMenu(e, model.id) : undefined}
                 >
                   <span class="model-card-primary">{resolveModelLabel(model)}</span>
                   {#if resolveModelSecondaryLabel(model)}
@@ -1900,6 +1927,15 @@
         <button class="context-item" onclick={handleSetDefault}>{t.setDefault}</button>
       {/if}
       <button class="context-item danger" onclick={handleContextDelete}>{t.delete}</button>
+    </div>
+  </div>
+{/if}
+
+{#if modelContextMenu}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="context-overlay" role="button" aria-label={i18n.t.close} tabindex="0" onclick={closeContextMenu} onkeydown={(e) => { if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ' ) { e.preventDefault(); closeContextMenu(); } }} oncontextmenu={(e) => { e.preventDefault(); closeContextMenu(); }}>
+    <div class="context-menu" style="left: {modelContextMenu.x}px; top: {modelContextMenu.y}px;">
+      <button class="context-item danger" onclick={handleDeleteManualModel}>{t.delete}</button>
     </div>
   </div>
 {/if}

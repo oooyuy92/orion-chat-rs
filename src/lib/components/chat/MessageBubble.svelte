@@ -9,6 +9,7 @@
   import Trash2Icon from '@lucide/svelte/icons/trash-2';
   import MessageSquarePlusIcon from '@lucide/svelte/icons/message-square-plus';
   import Columns2Icon from '@lucide/svelte/icons/columns-2';
+  import GitBranchIcon from '@lucide/svelte/icons/git-branch';
   import { i18n } from '$lib/stores/i18n.svelte';
 
   type MessageAction =
@@ -18,7 +19,8 @@
     | { type: 'regenerate'; messageId: string; modelId: string | null }
     | { type: 'generateVersion'; messageId: string }
     | { type: 'switchVersion'; versionGroupId: string; versionNumber: number }
-    | { type: 'expandVersions'; versionGroupId: string };
+    | { type: 'expandVersions'; versionGroupId: string }
+    | { type: 'fork'; messageId: string };
 
   type Props = {
     message: Message;
@@ -503,6 +505,13 @@
             onclick={generateVersion}
           >
             <MessageSquarePlusIcon size={14} />
+          </button>
+          <button
+            class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+            title={i18n.t.forkConversation}
+            onclick={() => onAction?.({ type: 'fork', messageId: message.id })}
+          >
+            <GitBranchIcon size={14} />
           </button>
           <button
             class="rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"

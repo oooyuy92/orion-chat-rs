@@ -1,0 +1,5 @@
+- 给 MessageList 上虚拟列表
+- 流式阶段取消 Markdown 解析，结束后再解析
+- getMessages() 改分页，先只取最近 100 条
+- 删掉大多数“操作后全量 reload”
+- 把超长 paste 内容外置存储

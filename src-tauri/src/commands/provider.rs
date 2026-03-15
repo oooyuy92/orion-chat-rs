@@ -187,32 +187,12 @@ pub async fn fetch_models(
         m.source = ModelSource::Synced;
     }
 
-    // Save to DB (upsert)
-    state.db.with_conn(|conn| {
-        for m in &models {
-            conn.execute(
-                "INSERT INTO models (id, provider_id, name, display_name, max_tokens, is_vision, is_enabled, source)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'synced')
-                 ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    display_name = excluded.display_name,
-                    max_tokens = excluded.max_tokens,
-                    is_vision = excluded.is_vision,
-                    source = 'synced'",
-                rusqlite::params![
-                    m.id,
-                    m.provider_id,
-                    m.request_name,
-                    m.display_name.clone().unwrap_or_else(|| m.name.clone()),
-                    m.context_length,
-                    m.supports_vision as i32,
-                ],
-            )?;
-        }
-        Ok(())
-    })?;
+    state
+        .db
+        .with_conn(|conn| replace_synced_models_for_provider(conn, &provider_id, &models))?;
 
-    Ok(models)
+    // Return all models (synced + manual) so the frontend stays in sync
+    state.db.with_conn(|conn| load_models_for_provider(conn, &provider_id))
 }
 
 #[tauri::command]
@@ -369,6 +349,62 @@ fn load_models_for_provider(
     Ok(result)
 }
 
+fn replace_synced_models_for_provider(
+    conn: &rusqlite::Connection,
+    provider_id: &str,
+    models: &[ModelInfo],
+) -> AppResult<()> {
+    for m in models {
+        conn.execute(
+            "INSERT INTO models (id, provider_id, name, display_name, max_tokens, is_vision, is_enabled, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'synced')
+             ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                display_name = excluded.display_name,
+                max_tokens = excluded.max_tokens,
+                is_vision = excluded.is_vision,
+                source = 'synced'",
+            rusqlite::params![
+                m.id,
+                m.provider_id,
+                m.request_name,
+                m.display_name.clone().unwrap_or_else(|| m.name.clone()),
+                m.context_length,
+                m.supports_vision as i32,
+            ],
+        )?;
+    }
+
+    let mut sql = String::from(
+        "DELETE FROM models
+         WHERE provider_id = ?1
+           AND source = 'synced'
+           AND id NOT IN (
+             SELECT model_id FROM assistants WHERE model_id IS NOT NULL
+           )
+           AND id NOT IN (
+             SELECT model_id FROM conversations WHERE model_id IS NOT NULL
+           )",
+    );
+
+    if !models.is_empty() {
+        let placeholders = std::iter::repeat_n("?", models.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(" AND id NOT IN ({placeholders})"));
+    }
+
+    let mut params = vec![rusqlite::types::Value::from(provider_id.to_string())];
+    params.extend(
+        models
+            .iter()
+            .map(|model| rusqlite::types::Value::from(model.id.clone())),
+    );
+
+    conn.execute(&sql, rusqlite::params_from_iter(params))?;
+    Ok(())
+}
+
 fn update_model_visibility_in_db(
     conn: &rusqlite::Connection,
     model_id: &str,
@@ -465,6 +501,19 @@ fn create_manual_model_in_db(
     let request_name = request_name.trim();
     if request_name.is_empty() {
         return Err(AppError::Provider("Request model name is required".into()));
+    }
+
+    // Reject duplicate model name within the same provider
+    let dup_count: i64 = conn.query_row(
+        "SELECT COUNT(1) FROM models WHERE provider_id = ?1 AND name = ?2",
+        rusqlite::params![provider_id, request_name],
+        |row| row.get(0),
+    )?;
+    if dup_count > 0 {
+        return Err(AppError::Provider(format!(
+            "Model '{}' already exists for this provider",
+            request_name
+        )));
     }
 
     let model_id = uuid::Uuid::new_v4().to_string();
@@ -771,5 +820,158 @@ mod tests {
 
         let delete_synced = delete_manual_model_in_db(&conn, "synced-1");
         assert!(delete_synced.is_err());
+    }
+
+    #[test]
+    fn replace_synced_models_removes_stale_unreferenced_rows_and_keeps_manual() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE providers (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              type TEXT NOT NULL,
+              api_key TEXT,
+              base_url TEXT,
+              is_enabled INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE models (
+              id TEXT PRIMARY KEY,
+              provider_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              display_name TEXT,
+              max_tokens INTEGER,
+              is_vision INTEGER NOT NULL DEFAULT 0,
+              is_enabled INTEGER NOT NULL DEFAULT 1,
+              source TEXT NOT NULL DEFAULT 'synced'
+            );
+            CREATE TABLE assistants (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              model_id TEXT
+            );
+            CREATE TABLE conversations (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              model_id TEXT
+            );
+            INSERT INTO providers (id, name, type, base_url, is_enabled)
+            VALUES ('p1', 'Test Provider', 'openai_compat', 'https://example.com/v1', 1);
+            INSERT INTO models (id, provider_id, name, display_name, is_enabled, source) VALUES
+              ('stale-synced', 'p1', 'old-model', 'Old Model', 1, 'synced'),
+              ('manual-1', 'p1', 'manual-model', 'Manual Model', 1, 'manual');
+            ",
+        )
+        .unwrap();
+
+        let fetched = vec![ModelInfo {
+            id: "fresh-synced".into(),
+            name: "Fresh Model".into(),
+            request_name: "fresh-model".into(),
+            display_name: Some("Fresh Model".into()),
+            provider_id: "p1".into(),
+            context_length: Some(128000),
+            supports_vision: true,
+            supports_streaming: true,
+            enabled: true,
+            source: ModelSource::Synced,
+        }];
+
+        replace_synced_models_for_provider(&conn, "p1", &fetched).unwrap();
+
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT id, source FROM models WHERE provider_id = 'p1' ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("fresh-synced".to_string(), "synced".to_string()),
+                ("manual-1".to_string(), "manual".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn replace_synced_models_keeps_stale_rows_when_referenced() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE providers (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              type TEXT NOT NULL,
+              api_key TEXT,
+              base_url TEXT,
+              is_enabled INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE models (
+              id TEXT PRIMARY KEY,
+              provider_id TEXT NOT NULL,
+              name TEXT NOT NULL,
+              display_name TEXT,
+              max_tokens INTEGER,
+              is_vision INTEGER NOT NULL DEFAULT 0,
+              is_enabled INTEGER NOT NULL DEFAULT 1,
+              source TEXT NOT NULL DEFAULT 'synced'
+            );
+            CREATE TABLE assistants (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              model_id TEXT
+            );
+            CREATE TABLE conversations (
+              id TEXT PRIMARY KEY,
+              title TEXT NOT NULL,
+              model_id TEXT
+            );
+            INSERT INTO providers (id, name, type, base_url, is_enabled)
+            VALUES ('p1', 'Test Provider', 'openai_compat', 'https://example.com/v1', 1);
+            INSERT INTO models (id, provider_id, name, display_name, is_enabled, source) VALUES
+              ('stale-conv', 'p1', 'old-conv-model', 'Old Conv Model', 1, 'synced'),
+              ('stale-assistant', 'p1', 'old-assistant-model', 'Old Assistant Model', 1, 'synced');
+            INSERT INTO conversations (id, title, model_id) VALUES
+              ('conv-1', 'Conversation', 'stale-conv');
+            INSERT INTO assistants (id, name, model_id) VALUES
+              ('assistant-1', 'Assistant', 'stale-assistant');
+            ",
+        )
+        .unwrap();
+
+        let fetched = vec![ModelInfo {
+            id: "fresh-synced".into(),
+            name: "Fresh Model".into(),
+            request_name: "fresh-model".into(),
+            display_name: Some("Fresh Model".into()),
+            provider_id: "p1".into(),
+            context_length: Some(128000),
+            supports_vision: true,
+            supports_streaming: true,
+            enabled: true,
+            source: ModelSource::Synced,
+        }];
+
+        replace_synced_models_for_provider(&conn, "p1", &fetched).unwrap();
+
+        let rows: Vec<String> = conn
+            .prepare("SELECT id FROM models WHERE provider_id = 'p1' ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![
+                "fresh-synced".to_string(),
+                "stale-assistant".to_string(),
+                "stale-conv".to_string(),
+            ]
+        );
     }
 }

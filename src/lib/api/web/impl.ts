@@ -83,8 +83,14 @@ export const webApi = {
   updateConversationAssistant(id: string, assistantId: string | null): Promise<void> {
     return patch(`/conversations/${id}/assistant`, { assistantId });
   },
+  updateConversationModel(id: string, modelId: string | null): Promise<void> {
+    return patch(`/conversations/${id}/model`, { modelId });
+  },
   generateConversationTitle(conversationId: string, modelId: string): Promise<string> {
     return post(`/conversations/${conversationId}/generate-title`, { modelId });
+  },
+  forkConversation(sourceConversationId: string, upToMessageId: string): Promise<Conversation> {
+    return post(`/conversations/${sourceConversationId}/fork`, { upToMessageId });
   },
 
   // Messages
@@ -120,8 +126,8 @@ export const webApi = {
         .catch(reject);
     });
   },
-  stopGeneration(): Promise<void> {
-    return post('/chat/stop');
+  stopGeneration(conversationId: string): Promise<void> {
+    return post('/chat/stop', { conversationId });
   },
   compressConversation(conversationId: string, modelId: string, onEvent: ChatEventHandler): Promise<Message[]> {
     return new Promise((resolve, reject) => {
@@ -198,6 +204,15 @@ export const webApi = {
   },
   fetchModels(providerId: string): Promise<ModelInfo[]> {
     return post(`/providers/${providerId}/fetch-models`);
+  },
+  createManualModel(providerId: string, requestName: string, displayName: string | null, enabled: boolean): Promise<ModelInfo> {
+    return post(`/providers/${providerId}/models`, { requestName, displayName, enabled });
+  },
+  updateManualModel(modelId: string, requestName: string, displayName: string | null, enabled: boolean): Promise<ModelInfo> {
+    return patch(`/models/${modelId}`, { requestName, displayName, enabled });
+  },
+  deleteManualModel(modelId: string): Promise<void> {
+    return del(`/models/${modelId}`);
   },
   updateModelVisibility(modelId: string, enabled: boolean): Promise<void> {
     return patch(`/models/${modelId}/visibility`, { enabled });

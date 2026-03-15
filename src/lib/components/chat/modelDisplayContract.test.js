@@ -16,6 +16,11 @@ test('model selector uses shared model-display helper for trigger and menu label
   assert.match(modelSelector, /resolveModelLabel/);
 });
 
+test('model selector pins composer dropdown placement to the top with viewport padding', () => {
+  assert.match(modelSelector, /<DropdownMenuContent[^>]*side="top"/s);
+  assert.match(modelSelector, /<DropdownMenuContent[^>]*collisionPadding=\{8\}/s);
+});
+
 test('assistant settings uses shared model-display helper for default model options', () => {
   assert.match(assistantSettings, /from '\$lib\/utils\/modelDisplay'/);
   assert.match(assistantSettings, /resolveModelLabel/);

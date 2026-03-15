@@ -53,7 +53,12 @@
       </button>
     {/snippet}
   </DropdownMenuTrigger>
-  <DropdownMenuContent class="w-[300px] bg-popover border border-border shadow-md">
+  <DropdownMenuContent
+    side="top"
+    align="start"
+    collisionPadding={8}
+    class="w-[300px] bg-popover border border-border shadow-md"
+  >
     {#each modelGroups as group, index (group.providerId)}
       {#if index > 0}
         <DropdownMenuSeparator />

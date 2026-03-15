@@ -54,8 +54,14 @@ const tauriApi = {
   updateConversationAssistant(id: string, assistantId: string | null): Promise<void> {
     return invoke('update_conversation_assistant', { id, assistantId });
   },
+  updateConversationModel(id: string, modelId: string | null): Promise<void> {
+    return invoke('update_conversation_model', { id, modelId });
+  },
   generateConversationTitle(conversationId: string, modelId: string): Promise<string> {
     return invoke('generate_conversation_title', { conversationId, modelId });
+  },
+  forkConversation(sourceConversationId: string, upToMessageId: string): Promise<Conversation> {
+    return invoke('fork_conversation', { sourceConversationId, upToMessageId });
   },
 
   // Messages
@@ -81,8 +87,8 @@ const tauriApi = {
     channel.onmessage = onEvent;
     return invoke('resend_message', { conversationId, modelId, channel, commonParams: commonParams ?? null, providerParams: providerParams ?? null });
   },
-  stopGeneration(): Promise<void> {
-    return invoke('stop_generation');
+  stopGeneration(conversationId: string): Promise<void> {
+    return invoke('stop_generation', { conversationId });
   },
   compressConversation(conversationId: string, modelId: string, onEvent: ChatEventHandler): Promise<Message[]> {
     const channel = new Channel<ChatEvent>();

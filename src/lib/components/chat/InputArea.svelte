@@ -12,6 +12,7 @@
     disabledReason = '',
     onSend,
     onGroupSend,
+    onModelSelect,
     onStop,
     suggestions = [],
     modelGroups = [],
@@ -21,6 +22,7 @@
     disabledReason?: string;
     onSend: (content: string) => void;
     onGroupSend?: (content: string, modelIds: string[]) => void;
+    onModelSelect?: (modelId: string) => void;
     onStop?: () => void;
     suggestions?: string[];
     modelGroups?: ModelGroup[];
@@ -158,7 +160,7 @@
   {/if}
 
   <div class="model-row">
-    <ModelSelector {modelGroups} bind:selected={selectedModelId} />
+    <ModelSelector {modelGroups} bind:selected={selectedModelId} onSelect={onModelSelect} />
     <ModelParamsPopover modelId={selectedModelId} providerType={currentProviderType} {disabled} />
     <ComboSelector
       {modelGroups}

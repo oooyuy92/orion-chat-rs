@@ -21,7 +21,16 @@
     | { type: 'regenerate'; messageId: string; modelId: string | null }
     | { type: 'generateVersion'; messageId: string }
     | { type: 'switchVersion'; versionGroupId: string; versionNumber: number }
-    | { type: 'expandVersions'; versionGroupId: string };
+    | { type: 'expandVersions'; versionGroupId: string }
+    | { type: 'fork'; messageId: string };
+
+  export interface ScrollState {
+    scrollTop: number;
+    viewportHeight: number;
+    totalHeight: number;
+    heightCache: Map<string, number>;
+    estimatedRowHeight: number;
+  }
 
   let {
     conversationId = '',
@@ -33,6 +42,8 @@
     canLoadOlderMessages = true,
     focusedMessageId = null,
     onLoadOlder,
+    onScrollTopChange,
+    onScrollStateChange,
   }: {
     conversationId?: string;
     messages: Message[];
@@ -43,6 +54,8 @@
     canLoadOlderMessages?: boolean;
     focusedMessageId?: string | null;
     onLoadOlder?: () => void | Promise<void>;
+    onScrollTopChange?: (scrollTop: number) => void;
+    onScrollStateChange?: (state: ScrollState) => void;
   } = $props();
 
   let container: HTMLDivElement | undefined = $state();
@@ -58,6 +71,9 @@
   let lastFocusedMessageId = $state('');
   let highlightTimer = $state<ReturnType<typeof setTimeout> | null>(null);
 
+  const isLastMessageStreaming = $derived(
+    messages.length > 0 && messages[messages.length - 1].status === 'streaming',
+  );
   const messageIds = $derived(messages.map((message) => message.id));
   const virtualWindow = $derived(
     calculateVirtualWindow({
@@ -71,21 +87,54 @@
   );
   const visibleMessages = $derived(messages.slice(virtualWindow.startIndex, virtualWindow.endIndex));
 
+  let scrollStateRafId = 0;
+
+  function notifyScrollState() {
+    cancelAnimationFrame(scrollStateRafId);
+    scrollStateRafId = requestAnimationFrame(() => {
+      onScrollStateChange?.({
+        scrollTop,
+        viewportHeight,
+        totalHeight: virtualWindow.totalHeight,
+        heightCache,
+        estimatedRowHeight: ESTIMATED_ROW_HEIGHT,
+      });
+    });
+  }
+
   function syncScrollMetrics() {
     if (!container) return;
     scrollTop = container.scrollTop;
+    onScrollTopChange?.(scrollTop);
     shouldFollowBottom = isNearBottom({
       scrollTop: container.scrollTop,
       scrollHeight: container.scrollHeight,
       clientHeight: container.clientHeight,
       threshold: BOTTOM_FOLLOW_THRESHOLD,
     });
+    notifyScrollState();
   }
 
 function scrollToBottom() {
   if (!container) return;
   container.scrollTop = container.scrollHeight;
   syncScrollMetrics();
+}
+
+export function jumpToIndex(index: number) {
+  if (!container || index < 0 || index >= messages.length) return;
+  const offset = estimateOffsetForIndex(index);
+  container.scrollTo({ top: offset, behavior: 'smooth' });
+}
+
+export function jumpToTop() {
+  if (!container) return;
+  container.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+export function jumpToBottom() {
+  if (!container) return;
+  container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
 }
 
 function estimateOffsetForIndex(index: number) {
@@ -162,9 +211,9 @@ function scrollToFocusedMessage(messageId: string) {
     nextCache.set(messageId, nextHeight);
     heightCache = nextCache;
 
-    if (shouldFollowBottom) {
+    if (shouldFollowBottom || isLastMessageStreaming) {
       requestAnimationFrame(() => {
-        if (shouldFollowBottom) {
+        if (shouldFollowBottom || isLastMessageStreaming) {
           scrollToBottom();
         }
       });
@@ -291,7 +340,7 @@ $effect(() => {
     const didAppendMessages = currentCount > previousMessageCount;
     const didReplaceTail = currentLastMessageId !== previousLastMessageId;
 
-    if (previousMessageCount === 0 || ((didAppendMessages || didReplaceTail) && shouldFollowBottom)) {
+    if (previousMessageCount === 0 || ((didAppendMessages || didReplaceTail) && (shouldFollowBottom || isLastMessageStreaming))) {
       void tick().then(scrollToBottom);
     }
 
@@ -335,25 +384,11 @@ $effect(() => {
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
-    scrollbar-width: thin;
-    scrollbar-color: oklch(0.85 0 0) transparent;
+    scrollbar-width: none;
   }
 
   .conversation-viewport::-webkit-scrollbar {
-    width: 2px;
-  }
-
-  .conversation-viewport::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .conversation-viewport::-webkit-scrollbar-thumb {
-    background: oklch(0.85 0 0);
-    border-radius: 9999px;
-  }
-
-  .conversation-viewport::-webkit-scrollbar-thumb:hover {
-    background: oklch(0.72 0 0);
+    display: none;
   }
 
   .conversation-stack {

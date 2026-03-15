@@ -9,7 +9,7 @@
   };
 
   let {
-    activeConversationId = $bindable(''),
+    activeConversationId = '',
     onConversationSelect,
   }: {
     activeConversationId?: string;
@@ -20,7 +20,7 @@
 <Sidebar>
   <SidebarContent class="px-2 pt-2">
     <ConversationList
-      bind:activeId={activeConversationId}
+      activeId={activeConversationId}
       onSelect={onConversationSelect}
     />
   </SidebarContent>

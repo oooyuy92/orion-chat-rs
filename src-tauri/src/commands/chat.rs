@@ -209,12 +209,13 @@ async fn run_stream(
         message_id: msg_id.to_string(),
     });
 
-    let _ = state.cancel_sender.send(false);
-    let cancel_rx = state.cancel_receiver.clone();
+    let cancel_rx = state.create_cancel_token(conversation_id).await;
 
     let result = provider
         .stream_chat(request, msg_id.to_string(), channel.clone(), cancel_rx)
         .await;
+
+    state.remove_cancel_token(conversation_id).await;
 
     match result {
         Ok(stream_result) => {
@@ -578,12 +579,13 @@ pub async fn compress_conversation(
         message_id: "compress".to_string(),
     });
 
-    let _ = state.cancel_sender.send(false);
-    let cancel_rx = state.cancel_receiver.clone();
+    let cancel_rx = state.create_cancel_token(&conversation_id).await;
 
     let result = provider
         .stream_chat(request, "compress".to_string(), channel.clone(), cancel_rx)
         .await;
+
+    state.remove_cancel_token(&conversation_id).await;
 
     match result {
         Ok(stream_result) => {
@@ -749,8 +751,8 @@ pub async fn send_message_group(
         .db
         .with_conn(|conn| db::messages::list_by_conversation(conn, &conversation_id))?;
 
-    // 5. Reset cancel once
-    let _ = state.cancel_sender.send(false);
+    // 5. Create per-conversation cancel token
+    let cancel_rx = state.create_cancel_token(&conversation_id).await;
 
     // 6. Load params for all models
     let assistant_prompt = load_assistant_system_prompt(&state, &conversation_id)?;
@@ -770,11 +772,11 @@ pub async fn send_message_group(
 
     for (i, (provider, provider_type, _model_id, request_model)) in resolved.into_iter().enumerate() {
         let msg_id = assistant_msg_ids[i].clone();
-        let state_clone = state.inner().clone();
         let channel_clone = channel.clone();
         let conv_id = conversation_id.clone();
         let request_messages = request_messages.clone();
         let first_finished = first_finished.clone();
+        let cancel_rx = cancel_rx.clone();
 
         let common = CommonParams {
             temperature: None,
@@ -784,6 +786,7 @@ pub async fn send_message_group(
         };
 
         let provider_params = default_provider_params(&provider_type);
+        let state_clone = state.inner().clone();
 
         join_set.spawn(async move {
             let request = ChatRequest {
@@ -796,8 +799,6 @@ pub async fn send_message_group(
             let _ = channel_clone.send(ChatEvent::Started {
                 message_id: msg_id.clone(),
             });
-
-            let cancel_rx = state_clone.cancel_receiver.clone();
 
             let result = provider
                 .stream_chat(request, msg_id.clone(), channel_clone.clone(), cancel_rx)
@@ -854,6 +855,9 @@ pub async fn send_message_group(
     // 8. Wait for all tasks to complete
     while let Some(_) = join_set.join_next().await {}
 
+    // Clean up cancel token
+    state.remove_cancel_token(&conversation_id).await;
+
     // 9. Activate the first version that finished successfully
     if let Some(winner_id) = first_finished.lock().unwrap().as_ref() {
         // Find its version_number
@@ -879,8 +883,11 @@ pub async fn send_message_group(
 }
 
 #[tauri::command]
-pub async fn stop_generation(state: State<'_, Arc<AppState>>) -> AppResult<()> {
-    let _ = state.cancel_sender.send(true);
+pub async fn stop_generation(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+) -> AppResult<()> {
+    state.cancel_conversation(&conversation_id).await;
     Ok(())
 }
 
