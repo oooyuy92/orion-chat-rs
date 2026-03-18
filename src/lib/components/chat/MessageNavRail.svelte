@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { Message } from '$lib/types';
+  import { activeToolCalls } from '$lib/stores/agent';
+  import { buildMessageRows } from './agentTimeline';
   import { getMeasuredHeight } from './messageVirtualization.js';
 
   function excerptFirstLine(content: string, max = 16): string {
@@ -34,30 +36,22 @@
   let hoveredIndex = $state<number | null>(null);
 
   const BUTTON_HEIGHT = 22;
-  const PILL_HEIGHT = 14;
-
+  const displayRows = $derived(buildMessageRows(messages, $activeToolCalls));
   const availableHeight = $derived(Math.max(0, railHeight - BUTTON_HEIGHT * 2 - 8));
 
-  /**
-   * Fisheye distortion: stretches positions near the focal point,
-   * compresses positions far away. Only activates when messages > 30.
-   * `t` and `focal` are in [0, 1]. Returns distorted [0, 1].
-   */
   function fisheye(t: number, focal: number, strength: number): number {
     const d = t - focal;
     const sign = d < 0 ? -1 : 1;
     const abs = Math.abs(d);
-    // power curve: small distances stay ~linear, large distances compress
     const warped = Math.pow(abs, strength);
-    // re-normalize so edges still map to 0/1
     const maxPos = Math.pow(Math.max(focal, 1 - focal), strength);
     return focal + sign * (warped / maxPos) * Math.max(focal, 1 - focal);
   }
 
   const messagePositions = $derived.by(() => {
-    if (messages.length === 0 || totalHeight === 0 || availableHeight <= 0) return [];
+    if (displayRows.length === 0 || totalHeight === 0 || availableHeight <= 0) return [];
 
-    const ids = messages.map((m) => m.id);
+    const ids = displayRows.map((row) => row.message.id);
     let offset = 0;
     const raw: { t: number; role: string; visible: boolean }[] = [];
     const scrollBottom = scrollTop + viewportHeight;
@@ -65,22 +59,20 @@
       ? Math.min(1, Math.max(0, (scrollTop + viewportHeight / 2) / totalHeight))
       : 0.5;
 
-    for (let i = 0; i < messages.length; i++) {
+    for (let i = 0; i < displayRows.length; i++) {
       const h = getMeasuredHeight(ids[i], heightCache, estimatedRowHeight);
       const msgCenter = offset + h / 2;
       const t = msgCenter / totalHeight;
       const msgTop = offset;
       const msgBottom = offset + h;
       const visible = msgBottom > scrollTop && msgTop < scrollBottom;
-      raw.push({ t, role: messages[i].role, visible });
+      raw.push({ t, role: displayRows[i].message.role, visible });
       offset += h;
     }
 
-    // Apply fisheye when dense (>30 messages)
-    const needsFisheye = messages.length > 30;
-    // Strength scales with message count: more messages → stronger compression
+    const needsFisheye = displayRows.length > 30;
     const strength = needsFisheye
-      ? Math.min(2.2, 1 + (messages.length - 30) / 80)
+      ? Math.min(2.2, 1 + (displayRows.length - 30) / 80)
       : 1;
 
     return raw.map(({ t, role, visible }) => {
@@ -116,7 +108,7 @@
             <span class="tooltip-tag" class:tag-user={pos.role === 'user'} class:tag-assistant={pos.role !== 'user'}>
               {pos.role === 'user' ? 'You' : 'AI'}
             </span>
-            {excerptFirstLine(messages[i].content)}
+            {excerptFirstLine(displayRows[i].message.content)}
           </span>
         {/if}
       </button>
