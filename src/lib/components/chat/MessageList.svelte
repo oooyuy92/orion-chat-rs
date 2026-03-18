@@ -373,14 +373,15 @@
       {/if}
 
       {#each visibleRows as row (row.message.id)}
+        {@const message = row.message}
         <div
           class="message-row"
-          class:message-row-highlighted={highlightedMessageId === row.message.id}
-          data-message-id={row.message.id}
-          use:measureRow={row.message.id}
+          class:message-row-highlighted={highlightedMessageId === message.id}
+          data-message-id={message.id}
+          use:measureRow={message.id}
         >
           <ToolTimeline calls={row.timelineCalls} />
-          <MessageBubble message={row.message} {onAction} {disabled} />
+          <MessageBubble {message} {onAction} {disabled} />
         </div>
       {/each}
 
