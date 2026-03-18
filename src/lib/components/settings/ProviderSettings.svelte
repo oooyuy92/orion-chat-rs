@@ -7,6 +7,7 @@
   import { Input } from '$lib/components/ui/input';
   import { Slider } from '$lib/components/ui/slider';
   import AssistantSettings from '$lib/components/settings/AssistantSettings.svelte';
+  import AgentSettings from '$lib/components/settings/AgentSettings.svelte';
   import { loadCombos, saveCombos, addCombo, deleteCombo } from '$lib/stores/modelCombos';
   import type { ModelCombo } from '$lib/types';
   import { isManualModel, resolveModelLabel, resolveModelSecondaryLabel } from '$lib/utils/modelDisplay';
@@ -18,6 +19,7 @@
   type NavItemId =
     | 'modelService'
     | 'assistants'
+    | 'agent'
     | 'modelCombos'
     | 'generalSettings'
     | 'displaySettings'
@@ -40,6 +42,8 @@
         return isEn ? 'Model Service' : '模型服务';
       case 'assistants':
         return isEn ? 'Assistant Settings' : '助手设置';
+      case 'agent':
+        return isEn ? 'Agent' : 'Agent 设置';
       case 'modelCombos':
         return isEn ? 'Model Combos' : '模型组合';
       case 'generalSettings':
@@ -58,7 +62,7 @@
   }
 
   const sectionGroups = $derived.by((): SectionGroup[] => [
-    { title: navLabel('modelService'), items: ['modelService', 'assistants', 'modelCombos', 'generalSettings', 'displaySettings', 'dataSettings'] },
+    { title: navLabel('modelService'), items: ['modelService', 'assistants', 'agent', 'modelCombos', 'generalSettings', 'displaySettings', 'dataSettings'] },
     { title: language === 'en' ? 'Quick Features' : '快捷功能', items: ['quickPhrases', 'shortcuts'] },
     { title: language === 'en' ? 'Other' : '其他', items: ['about'] },
   ]);
@@ -1487,6 +1491,10 @@
   {:else if activeNav === 'assistants'}
     <section class="assistants-panel">
       <AssistantSettings />
+    </section>
+  {:else if activeNav === 'agent'}
+    <section class="agent-panel">
+      <AgentSettings />
     </section>
   {:else if activeNav === 'modelCombos'}
     {#snippet comboEditor()}
