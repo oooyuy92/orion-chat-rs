@@ -18,6 +18,13 @@ use crate::error::{AppError, AppResult};
 use crate::models::{AuthAction, ChatEvent, Message, MessageStatus, MessageType, Role, ToolPermissions};
 use crate::state::AppState;
 
+#[derive(Debug, PartialEq)]
+struct AssistantOutcome {
+    status: MessageStatus,
+    content: String,
+    emit_finished: bool,
+}
+
 #[tauri::command]
 pub async fn agent_chat(
     state: State<'_, Arc<AppState>>,
@@ -115,18 +122,21 @@ pub async fn agent_chat(
 
     app_state.remove_cancel_token(&conversation_id).await;
 
-    let final_text = extract_final_text(&new_messages);
+    let outcome = final_assistant_outcome(&new_messages).ok_or(AppError::Cancelled)?;
     let assistant_message = insert_assistant_message(
         &app_state.db,
         &conversation_id,
         &assistant_message_id,
-        &final_text,
+        &outcome.content,
         &model_id,
+        outcome.status,
     )?;
 
-    emit_event(ChatEvent::Finished {
-        message_id: assistant_message_id,
-    });
+    if outcome.emit_finished {
+        emit_event(ChatEvent::Finished {
+            message_id: assistant_message_id,
+        });
+    }
 
     let _ = user_message;
     Ok(assistant_message)
@@ -231,10 +241,18 @@ fn build_tools(
 
     vec![
         make_tool(Box::new(BashTool::new().with_cwd(working_dir.to_string()))),
-        make_tool(Box::new(ReadFileTool::new())),
-        make_tool(Box::new(WriteFileTool::new())),
-        make_tool(Box::new(EditFileTool::new())),
-        make_tool(Box::new(ListFilesTool::new())),
+        make_tool(Box::new(
+            ReadFileTool::new().with_allowed_paths(vec![working_dir.to_string()]),
+        )),
+        make_tool(Box::new(
+            WriteFileTool::new().with_allowed_paths(vec![working_dir.to_string()]),
+        )),
+        make_tool(Box::new(
+            EditFileTool::new().with_allowed_paths(vec![working_dir.to_string()]),
+        )),
+        make_tool(Box::new(
+            ListFilesTool::new().with_root(working_dir.to_string()),
+        )),
         make_tool(Box::new(SearchTool::new().with_root(working_dir.to_string()))),
     ]
 }
@@ -348,6 +366,7 @@ fn insert_assistant_message(
     message_id: &str,
     content: &str,
     model_id: &str,
+    status: MessageStatus,
 ) -> AppResult<Message> {
     let message = Message {
         id: message_id.to_string(),
@@ -356,7 +375,7 @@ fn insert_assistant_message(
         content: content.to_string(),
         reasoning: None,
         model_id: Some(model_id.to_string()),
-        status: MessageStatus::Done,
+        status,
         token_count: None,
         created_at: crate::commands::chat::chrono_now(),
         version_group_id: None,
@@ -373,24 +392,56 @@ fn insert_assistant_message(
     Ok(message)
 }
 
-fn extract_final_text(messages: &[AgentMessage]) -> String {
+fn final_assistant_outcome(messages: &[AgentMessage]) -> Option<AssistantOutcome> {
     messages
         .iter()
         .rev()
         .find_map(|message| match message {
-            AgentMessage::Llm(AgentLlmMessage::Assistant { content, .. }) => Some(
-                content
+            AgentMessage::Llm(AgentLlmMessage::Assistant {
+                content,
+                stop_reason,
+                error_message,
+                ..
+            }) => {
+                let text = content
                     .iter()
                     .filter_map(|item| match item {
                         Content::Text { text } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect::<Vec<_>>()
-                    .join(""),
-            ),
+                    .join("");
+
+                match stop_reason {
+                    StopReason::Stop => Some(AssistantOutcome {
+                        status: MessageStatus::Done,
+                        content: text,
+                        emit_finished: true,
+                    }),
+                    StopReason::Error => Some(AssistantOutcome {
+                        status: MessageStatus::Error,
+                        content: error_message
+                            .clone()
+                            .filter(|message| !message.trim().is_empty())
+                            .unwrap_or_else(|| {
+                                if text.trim().is_empty() {
+                                    "Agent error".to_string()
+                                } else {
+                                    text
+                                }
+                            }),
+                        emit_finished: false,
+                    }),
+                    StopReason::Aborted => None,
+                    _ => Some(AssistantOutcome {
+                        status: MessageStatus::Done,
+                        content: text,
+                        emit_finished: false,
+                    }),
+                }
+            }
             _ => None,
         })
-        .unwrap_or_default()
 }
 
 fn watch_to_cancellation_token(
@@ -407,4 +458,144 @@ fn watch_to_cancellation_token(
         }
     });
     token
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    fn assistant_message(
+        stop_reason: StopReason,
+        text: &str,
+        error_message: Option<&str>,
+    ) -> AgentMessage {
+        AgentMessage::Llm(AgentLlmMessage::Assistant {
+            content: vec![Content::Text {
+                text: text.to_string(),
+            }],
+            stop_reason,
+            model: "test-model".into(),
+            provider: "test-provider".into(),
+            usage: Usage::default(),
+            timestamp: now_ms(),
+            error_message: error_message.map(str::to_string),
+        })
+    }
+
+    fn test_ctx(name: &str) -> yoagent::ToolContext {
+        yoagent::ToolContext {
+            tool_call_id: "tool-call-1".into(),
+            tool_name: name.into(),
+            cancel: CancellationToken::new(),
+            on_update: None,
+            on_progress: None,
+        }
+    }
+
+    fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "orion-agent-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_agent_run_error_uses_error_status_and_no_finished_event() {
+        let outcome = final_assistant_outcome(&[assistant_message(
+            StopReason::Error,
+            "",
+            Some("provider exploded"),
+        )]);
+
+        assert_eq!(
+            outcome,
+            Some(AssistantOutcome {
+                status: MessageStatus::Error,
+                content: "provider exploded".into(),
+                emit_finished: false,
+            })
+        );
+    }
+
+    #[test]
+    fn test_agent_run_aborted_without_content_persists_nothing() {
+        let outcome = final_assistant_outcome(&[assistant_message(
+            StopReason::Aborted,
+            "",
+            None,
+        )]);
+
+        assert_eq!(outcome, None);
+    }
+
+    #[tokio::test]
+    async fn test_build_tools_scopes_read_file_to_working_dir() {
+        let state = Arc::new(AppState::new(":memory:", "/tmp").unwrap());
+        let working_dir = unique_temp_dir("working-dir");
+        let outside_dir = unique_temp_dir("outside-dir");
+        let outside_file = outside_dir.join("secret.txt");
+        std::fs::write(&outside_file, "secret").unwrap();
+
+        let tools = build_tools(
+            state,
+            "conv-1",
+            ToolPermissions::with_defaults(),
+            Arc::new(|_| {}),
+            &working_dir.display().to_string(),
+        );
+        let read_tool = tools
+            .into_iter()
+            .find(|tool| tool.name() == "read_file")
+            .unwrap();
+
+        let result = read_tool
+            .execute(
+                serde_json::json!({ "path": outside_file.display().to_string() }),
+                test_ctx("read_file"),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("outside"));
+
+        let _ = std::fs::remove_dir_all(working_dir);
+        let _ = std::fs::remove_dir_all(outside_dir);
+    }
+
+    #[tokio::test]
+    async fn test_build_tools_scopes_list_files_to_working_dir() {
+        let state = Arc::new(AppState::new(":memory:", "/tmp").unwrap());
+        let working_dir = unique_temp_dir("working-dir-list");
+        let outside_dir = unique_temp_dir("outside-dir-list");
+        std::fs::write(outside_dir.join("secret.txt"), "secret").unwrap();
+
+        let tools = build_tools(
+            state,
+            "conv-1",
+            ToolPermissions::with_defaults(),
+            Arc::new(|_| {}),
+            &working_dir.display().to_string(),
+        );
+        let list_tool = tools
+            .into_iter()
+            .find(|tool| tool.name() == "list_files")
+            .unwrap();
+
+        let result = list_tool
+            .execute(
+                serde_json::json!({ "path": outside_dir.display().to_string() }),
+                test_ctx("list_files"),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("outside"));
+
+        let _ = std::fs::remove_dir_all(working_dir);
+        let _ = std::fs::remove_dir_all(outside_dir);
+    }
 }

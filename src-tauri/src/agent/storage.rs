@@ -38,6 +38,7 @@ pub fn insert_tool_call_result(
     db: &Database,
     conversation_id: &str,
     tool_call_id: &str,
+    tool_name: &str,
     result: &str,
     is_error: bool,
 ) -> AppResult<String> {
@@ -46,14 +47,15 @@ pub fn insert_tool_call_result(
     db.with_conn(|conn| {
         conn.execute(
             "INSERT INTO messages
-                (id, conversation_id, role, content, message_type, tool_call_id, tool_error, status, created_at, version_group_id, version_number, is_active_version)
+                (id, conversation_id, role, content, message_type, tool_call_id, tool_name, tool_error, status, created_at, version_group_id, version_number, is_active_version)
              VALUES
-                (?1, ?2, 'assistant', ?3, 'tool_result', ?4, ?5, 'done', datetime('now'), ?1, 1, 1)",
+                (?1, ?2, 'assistant', ?3, 'tool_result', ?4, ?5, ?6, 'done', datetime('now'), ?1, 1, 1)",
             rusqlite::params![
                 message_id,
                 conversation_id,
                 result,
                 tool_call_id,
+                tool_name,
                 if is_error { 1 } else { 0 }
             ],
         )?;
@@ -126,20 +128,39 @@ mod tests {
         let db = setup_db();
 
         insert_tool_call_start(&db, "test-conv", "call-456", "bash", "{}").unwrap();
-        let result_id =
-            insert_tool_call_result(&db, "test-conv", "call-456", "exit 0", false).unwrap();
+        let result_id = insert_tool_call_result(
+            &db,
+            "test-conv",
+            "call-456",
+            "bash",
+            "exit 0",
+            false,
+        )
+        .unwrap();
 
         let is_error: i64 = db
             .with_conn(|conn| {
                 conn.query_row(
                     "SELECT tool_error FROM messages WHERE id = ?1",
-                    [result_id],
+                    [result_id.clone()],
                     |row| row.get(0),
                 )
                 .map_err(Into::into)
             })
             .unwrap();
         assert_eq!(is_error, 0);
+
+        let tool_name: String = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT tool_name FROM messages WHERE id = ?1",
+                    [result_id],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(tool_name, "bash");
     }
 
     #[test]
@@ -147,7 +168,8 @@ mod tests {
         let db = setup_db();
 
         insert_tool_call_start(&db, "test-conv", "call-789", "bash", "{}").unwrap();
-        insert_tool_call_result(&db, "test-conv", "call-789", "some output", false).unwrap();
+        insert_tool_call_result(&db, "test-conv", "call-789", "bash", "some output", false)
+            .unwrap();
 
         let count: i64 = db
             .with_conn(|conn| {

@@ -76,6 +76,7 @@ pub async fn handle_agent_event(
         }
         AgentEvent::ToolExecutionEnd {
             tool_call_id,
+            tool_name,
             result,
             is_error,
             ..
@@ -84,6 +85,7 @@ pub async fn handle_agent_event(
                 db,
                 conversation_id,
                 &tool_call_id,
+                &tool_name,
                 &render_tool_result(&result),
                 is_error,
             ) {
