@@ -1,6 +1,7 @@
 export type Role = 'system' | 'user' | 'assistant';
 
 export type MessageStatus = 'streaming' | 'done' | 'error';
+export type MessageType = 'text' | 'toolCall' | 'toolResult';
 
 export interface Message {
   id: string;
@@ -15,6 +16,11 @@ export interface Message {
   versionGroupId: string | null;
   versionNumber: number;
   totalVersions: number;
+  messageType: MessageType;
+  toolCallId?: string;
+  toolName?: string;
+  toolInput?: string;
+  toolError: boolean;
 }
 
 export interface PagedMessages {
@@ -25,6 +31,47 @@ export interface PagedMessages {
 export interface GetMessagesOptions {
   limit?: number;
   beforeMessageId?: string | null;
+}
+
+export type ChatEvent =
+  | { type: 'started'; messageId: string }
+  | { type: 'delta'; messageId: string; content: string }
+  | { type: 'reasoning'; messageId: string; content: string }
+  | { type: 'usage'; messageId: string; promptTokens: number; completionTokens: number }
+  | { type: 'finished'; messageId: string }
+  | { type: 'error'; messageId: string; message: string }
+  | { type: 'toolCallStart'; messageId: string; toolCallId: string; toolName: string; args: string }
+  | {
+      type: 'toolCallUpdate';
+      messageId: string;
+      toolCallId: string;
+      partialResult: string;
+    }
+  | {
+      type: 'toolCallEnd';
+      messageId: string;
+      toolCallId: string;
+      result: string;
+      isError: boolean;
+    }
+  | { type: 'toolAuthRequest'; toolCallId: string; toolName: string; args: string };
+
+export type PermissionLevel = 'auto' | 'ask' | 'deny';
+export type AuthAction = 'allow' | 'allowSession' | 'deny';
+
+export interface ToolPermissions {
+  [toolName: string]: PermissionLevel;
+}
+
+export interface ToolCallState {
+  toolCallId: string;
+  toolName: string;
+  args: string;
+  status: 'running' | 'completed' | 'error';
+  result?: string;
+  messageId: string;
+  startTime: number;
+  endTime?: number;
 }
 
 

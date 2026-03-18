@@ -7,8 +7,7 @@
   import { api } from '$lib/utils/invoke';
   import { titleUpdates, assistantUpdates, conversationCreated, streamingConversations } from '$lib/stores/conversations';
   import { getModelParams } from '$lib/stores/modelParams';
-  import type { ChatEvent } from '$lib/utils/invoke';
-  import type { Assistant, Conversation, Message, ModelGroup, ProviderType } from '$lib/types';
+  import type { Assistant, ChatEvent, Conversation, Message, ModelGroup, ProviderType } from '$lib/types';
   import { i18n } from '$lib/stores/i18n.svelte';
 
   type ConversationSelection = {
@@ -578,6 +577,8 @@ function handleConversationSelect(selection: ConversationSelection) {
       versionGroupId: null,
       versionNumber: 1,
       totalVersions: 1,
+      messageType: 'text',
+      toolError: false,
     };
     messages = [...messages, userMsg];
 
@@ -595,6 +596,8 @@ function handleConversationSelect(selection: ConversationSelection) {
       versionGroupId: null,
       versionNumber: 1,
       totalVersions: 1,
+      messageType: 'text',
+      toolError: false,
     };
     messages = [...messages, assistantMsg];
     streamingMessageId = assistantMsg.id;
@@ -711,6 +714,8 @@ function handleConversationSelect(selection: ConversationSelection) {
         versionGroupId: null,
         versionNumber: 1,
         totalVersions: 1,
+        messageType: 'text',
+        toolError: false,
       };
       messages = [...messages, assistantMsg];
       streamingMessageId = assistantMsg.id;
@@ -820,6 +825,8 @@ function handleConversationSelect(selection: ConversationSelection) {
         versionGroupId: null,
         versionNumber: 1,
         totalVersions: versionModels.length,
+        messageType: 'text',
+        toolError: false,
       };
       messages = [...messages, assistantMsg];
       streamingMessageId = assistantMsg.id;
@@ -875,6 +882,8 @@ function handleConversationSelect(selection: ConversationSelection) {
           versionGroupId: currentAiMsg.versionGroupId || currentAiMsg.id,
           versionNumber: i + 1,
           totalVersions: versionModels.length,
+          messageType: 'text',
+          toolError: false,
         };
 
         const aiIdx = currentMsgs.findIndex((m) => m.id === currentAiMsg.id);
@@ -1002,6 +1011,8 @@ function handleConversationSelect(selection: ConversationSelection) {
         versionGroupId: currentMsg.versionGroupId || currentMsg.id,
         versionNumber: currentMsg.totalVersions + 1,
         totalVersions: currentMsg.totalVersions + 1,
+        messageType: 'text',
+        toolError: false,
       };
 
       // Replace current message with placeholder, remove everything after
@@ -1074,6 +1085,8 @@ function handleConversationSelect(selection: ConversationSelection) {
       versionGroupId: null,
       versionNumber: 1,
       totalVersions: 1,
+      messageType: 'text',
+      toolError: false,
     };
     messages = [...messages, userMsg];
 
@@ -1092,6 +1105,8 @@ function handleConversationSelect(selection: ConversationSelection) {
       versionGroupId: null,
       versionNumber: idx + 1,
       totalVersions: modelIds.length,
+      messageType: 'text' as const,
+      toolError: false,
     }));
     groupStreamingMessages = [...placeholders];
     markStreaming(convId);
@@ -1117,6 +1132,10 @@ function handleConversationSelect(selection: ConversationSelection) {
               };
               groupStreamingMessages = [...groupStreamingMessages];
             }
+            return;
+          }
+
+          if (event.type === 'toolAuthRequest') {
             return;
           }
 

@@ -2,7 +2,7 @@
  * Web 端 SSE 流式请求工具。
  * 对应 Tauri 端的 Channel<ChatEvent>。
  */
-import type { ChatEvent } from '$lib/utils/invoke';
+import type { ChatEvent } from '$lib/types';
 
 export async function streamRequest(
   url: string,

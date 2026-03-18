@@ -1,5 +1,6 @@
 import { invoke, Channel } from '@tauri-apps/api/core';
 import type {
+  ChatEvent,
   Conversation,
   Message,
   PagedMessages,
@@ -18,14 +19,6 @@ import { isTauri } from '$lib/api/platform';
 import { webApi } from '$lib/api/web/impl';
 
 export type ChatEventHandler = (event: ChatEvent) => void;
-
-export type ChatEvent =
-  | { type: 'started'; messageId: string }
-  | { type: 'delta'; messageId: string; content: string }
-  | { type: 'reasoning'; messageId: string; content: string }
-  | { type: 'usage'; messageId: string; promptTokens: number; completionTokens: number }
-  | { type: 'finished'; messageId: string }
-  | { type: 'error'; messageId: string; message: string };
 
 export type AppPaths = {
   dataDir: string;
