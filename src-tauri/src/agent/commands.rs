@@ -13,6 +13,7 @@ use yoagent::{
 use crate::agent::config;
 use crate::agent::events::handle_agent_event;
 use crate::agent::permissions::{ChatEventEmitter, PermissionedTool};
+use crate::agent::skills::{self, SkillInfo};
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::{AuthAction, ChatEvent, Message, MessageStatus, MessageType, Role, ToolPermissions};
@@ -187,6 +188,49 @@ pub async fn set_tool_permissions(
         )?;
         Ok(())
     })
+}
+
+#[tauri::command]
+pub async fn get_skills_dir(state: State<'_, Arc<AppState>>) -> AppResult<String> {
+    state.db.with_conn(|conn| {
+        Ok(conn
+            .query_row(
+                "SELECT value FROM agent_settings WHERE key = 'skills_dir'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_default())
+    })
+}
+
+#[tauri::command]
+pub async fn set_skills_dir(state: State<'_, Arc<AppState>>, dir: String) -> AppResult<()> {
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_settings (key, value) VALUES ('skills_dir', ?1)",
+            rusqlite::params![dir],
+        )?;
+        Ok(())
+    })
+}
+
+#[tauri::command]
+pub async fn scan_skills(state: State<'_, Arc<AppState>>) -> AppResult<Vec<SkillInfo>> {
+    let dir = state.db.with_conn(|conn| {
+        Ok(conn
+            .query_row(
+                "SELECT value FROM agent_settings WHERE key = 'skills_dir'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_default())
+    })?;
+
+    if dir.is_empty() {
+        return Ok(vec![]);
+    }
+
+    skills::scan_skills_dir(&dir)
 }
 
 fn load_tool_permissions(state: &AppState) -> AppResult<ToolPermissions> {
