@@ -4,11 +4,14 @@
 //! entire files, the agent specifies exact text to find and replace.
 //! Modeled after Claude Code's Edit tool and Aider's search/replace blocks.
 
+use super::path::{resolve_existing_path, resolve_write_path};
 use crate::types::*;
 use async_trait::async_trait;
 
 /// Surgical file editing via exact text search/replace.
-pub struct EditFileTool;
+pub struct EditFileTool {
+    pub allowed_paths: Vec<String>,
+}
 
 impl Default for EditFileTool {
     fn default() -> Self {
@@ -18,7 +21,14 @@ impl Default for EditFileTool {
 
 impl EditFileTool {
     pub fn new() -> Self {
-        Self
+        Self {
+            allowed_paths: Vec::new(),
+        }
+    }
+
+    pub fn with_allowed_paths(mut self, allowed_paths: Vec<String>) -> Self {
+        self.allowed_paths = allowed_paths;
+        self
     }
 }
 
@@ -72,16 +82,18 @@ impl AgentTool for EditFileTool {
         let new_text = params["new_text"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'new_text' parameter".into()))?;
+        let resolved_path = resolve_existing_path(path, &self.allowed_paths)?;
 
         if cancel.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
 
         // Read existing file
-        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+        let content = tokio::fs::read_to_string(&resolved_path).await.map_err(|e| {
             ToolError::Failed(format!(
                 "Cannot read {}: {}. Use write_file to create new files.",
-                path, e
+                resolved_path.display(),
+                e
             ))
         })?;
 
@@ -102,23 +114,26 @@ impl AgentTool for EditFileTool {
 
             return Err(ToolError::Failed(format!(
                 "old_text not found in {}.{}",
-                path, hint
+                resolved_path.display(),
+                hint
             )));
         }
 
         if match_count > 1 {
             return Err(ToolError::Failed(format!(
                 "old_text matches {} locations in {}. Include more surrounding context to make the match unique.",
-                match_count, path
+                match_count,
+                resolved_path.display()
             )));
         }
 
         // Perform the replacement
         let new_content = content.replacen(old_text, new_text, 1);
+        let write_path = resolve_write_path(path, &self.allowed_paths)?;
 
-        tokio::fs::write(path, &new_content)
+        tokio::fs::write(&write_path, &new_content)
             .await
-            .map_err(|e| ToolError::Failed(format!("Cannot write {}: {}", path, e)))?;
+            .map_err(|e| ToolError::Failed(format!("Cannot write {}: {}", write_path.display(), e)))?;
 
         // Show what changed
         let old_lines = old_text.lines().count();
@@ -132,14 +147,14 @@ impl AgentTool for EditFileTool {
                 if old_lines == 1 { "" } else { "s" },
                 new_lines,
                 if new_lines == 1 { "" } else { "s" },
-                path
+                write_path.display()
             )
         };
 
         Ok(ToolResult {
             content: vec![Content::Text { text: diff_summary }],
             details: serde_json::json!({
-                "path": path,
+                "path": write_path.display().to_string(),
                 "old_lines": old_lines,
                 "new_lines": new_lines,
             }),

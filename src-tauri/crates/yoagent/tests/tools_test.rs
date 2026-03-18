@@ -28,6 +28,15 @@ fn ctx_with_cancel(name: &str, cancel: CancellationToken) -> ToolContext {
     }
 }
 
+fn unique_temp_dir(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "yoagent-{name}-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 #[tokio::test]
 async fn test_bash_echo() {
     let tool = BashTool::new();
@@ -182,6 +191,31 @@ async fn test_read_file_not_found() {
 }
 
 #[tokio::test]
+async fn test_read_file_rejects_paths_outside_allowed_root() {
+    let root_dir = unique_temp_dir("read-root");
+    let outside_dir = unique_temp_dir("read-outside");
+    let outside_file = outside_dir.join("secret.txt");
+    std::fs::write(&outside_file, "top secret").unwrap();
+
+    let tool = ReadFileTool {
+        max_bytes: 1024 * 1024,
+        allowed_paths: vec![root_dir.display().to_string()],
+    };
+    let result = tool
+        .execute(
+            serde_json::json!({"path": outside_file.display().to_string()}),
+            ctx("read_file"),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("outside"));
+
+    let _ = std::fs::remove_dir_all(root_dir);
+    let _ = std::fs::remove_dir_all(outside_dir);
+}
+
+#[tokio::test]
 async fn test_write_creates_directories() {
     let tmp = std::env::temp_dir().join("yoagent-test-nested/deep/dir/file.txt");
     let path = tmp.to_str().unwrap();
@@ -199,6 +233,31 @@ async fn test_write_creates_directories() {
 
     // Cleanup
     let _ = std::fs::remove_dir_all(std::env::temp_dir().join("yoagent-test-nested"));
+}
+
+#[tokio::test]
+async fn test_write_file_rejects_paths_outside_allowed_root() {
+    let root_dir = unique_temp_dir("write-root");
+    let outside_dir = unique_temp_dir("write-outside");
+    let outside_file = outside_dir.join("secret.txt");
+
+    let tool = WriteFileTool::new().with_allowed_paths(vec![root_dir.display().to_string()]);
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "path": outside_file.display().to_string(),
+                "content": "should be blocked"
+            }),
+            ctx("write_file"),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("outside"));
+    assert!(!outside_file.exists());
+
+    let _ = std::fs::remove_dir_all(root_dir);
+    let _ = std::fs::remove_dir_all(outside_dir);
 }
 
 #[tokio::test]
@@ -246,6 +305,30 @@ async fn test_search_no_matches() {
     assert!(text.contains("No matches"));
 
     let _ = std::fs::remove_dir_all(tmp_dir);
+}
+
+#[tokio::test]
+async fn test_search_rejects_paths_outside_root() {
+    let root_dir = unique_temp_dir("search-root");
+    let outside_dir = unique_temp_dir("search-outside");
+    std::fs::write(outside_dir.join("a.txt"), "hello").unwrap();
+
+    let tool = SearchTool::new().with_root(root_dir.display().to_string());
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "pattern": "hello",
+                "path": outside_dir.display().to_string()
+            }),
+            ctx("search"),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("outside"));
+
+    let _ = std::fs::remove_dir_all(root_dir);
+    let _ = std::fs::remove_dir_all(outside_dir);
 }
 
 // --- Edit tool tests ---
@@ -296,6 +379,32 @@ async fn test_edit_file_no_match() {
 }
 
 #[tokio::test]
+async fn test_edit_file_rejects_paths_outside_allowed_root() {
+    let root_dir = unique_temp_dir("edit-root");
+    let outside_dir = unique_temp_dir("edit-outside");
+    let outside_file = outside_dir.join("secret.txt");
+    std::fs::write(&outside_file, "hello world\n").unwrap();
+
+    let tool = EditFileTool::new().with_allowed_paths(vec![root_dir.display().to_string()]);
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "path": outside_file.display().to_string(),
+                "old_text": "hello",
+                "new_text": "goodbye"
+            }),
+            ctx("edit_file"),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("outside"));
+
+    let _ = std::fs::remove_dir_all(root_dir);
+    let _ = std::fs::remove_dir_all(outside_dir);
+}
+
+#[tokio::test]
 async fn test_list_files_tool() {
     let tmp_dir = std::env::temp_dir().join("yoagent-test-list2");
     let _ = std::fs::create_dir_all(tmp_dir.join("sub"));
@@ -315,6 +424,27 @@ async fn test_list_files_tool() {
     };
     assert!(text.contains("a.rs"));
     let _ = std::fs::remove_dir_all(tmp_dir);
+}
+
+#[tokio::test]
+async fn test_list_files_rejects_paths_outside_root() {
+    let root_dir = unique_temp_dir("list-root");
+    let outside_dir = unique_temp_dir("list-outside");
+    std::fs::write(outside_dir.join("a.rs"), "").unwrap();
+
+    let tool = ListFilesTool::new().with_root(root_dir.display().to_string());
+    let result = tool
+        .execute(
+            serde_json::json!({"path": outside_dir.display().to_string()}),
+            ctx("list_files"),
+        )
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("outside"));
+
+    let _ = std::fs::remove_dir_all(root_dir);
+    let _ = std::fs::remove_dir_all(outside_dir);
 }
 
 #[tokio::test]

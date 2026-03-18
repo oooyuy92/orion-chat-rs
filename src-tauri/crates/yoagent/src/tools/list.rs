@@ -1,5 +1,6 @@
 //! List files tool — directory exploration.
 
+use super::path::resolve_directory_path;
 use crate::types::*;
 use async_trait::async_trait;
 use std::time::Duration;
@@ -7,6 +8,7 @@ use tokio::process::Command;
 
 /// List files and directories. Uses `find` or `fd` for efficient traversal.
 pub struct ListFilesTool {
+    pub root: Option<String>,
     pub max_results: usize,
     pub timeout: Duration,
 }
@@ -14,6 +16,7 @@ pub struct ListFilesTool {
 impl Default for ListFilesTool {
     fn default() -> Self {
         Self {
+            root: None,
             max_results: 200,
             timeout: Duration::from_secs(10),
         }
@@ -23,6 +26,11 @@ impl Default for ListFilesTool {
 impl ListFilesTool {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_root(mut self, root: impl Into<String>) -> Self {
+        self.root = Some(root.into());
+        self
     }
 }
 
@@ -66,7 +74,7 @@ impl AgentTool for ListFilesTool {
         ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let cancel = ctx.cancel;
-        let path = params["path"].as_str().unwrap_or(".");
+        let path = resolve_directory_path(params["path"].as_str(), self.root.as_deref())?;
         let pattern = params["pattern"].as_str();
         let max_depth = params["max_depth"].as_u64().unwrap_or(3);
 
@@ -75,15 +83,15 @@ impl AgentTool for ListFilesTool {
         }
 
         // Check path exists
-        if !std::path::Path::new(path).exists() {
+        if !path.exists() {
             return Err(ToolError::Failed(format!(
                 "Directory not found: {}. Check the path and try again.",
-                path
+                path.display()
             )));
         }
 
         let mut cmd = Command::new("find");
-        cmd.arg(path);
+        cmd.arg(&path);
         cmd.args(["-maxdepth", &max_depth.to_string()]);
 
         if let Some(pat) = pattern {
@@ -120,7 +128,7 @@ impl AgentTool for ListFilesTool {
         }
 
         let text = if lines.is_empty() {
-            format!("No files found in {}", path)
+            format!("No files found in {}", path.display())
         } else if truncated {
             format!(
                 "{}\n\n... ({} files, showing first {})",

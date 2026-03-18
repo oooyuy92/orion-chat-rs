@@ -2,6 +2,7 @@ pub mod bash;
 pub mod edit;
 pub mod file;
 pub mod list;
+mod path;
 pub mod search;
 
 pub use bash::BashTool;

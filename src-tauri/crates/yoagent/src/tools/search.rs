@@ -1,5 +1,6 @@
 //! Search tool — grep/ripgrep-style search across files.
 
+use super::path::resolve_directory_path;
 use crate::types::*;
 use async_trait::async_trait;
 use std::time::Duration;
@@ -85,11 +86,7 @@ impl AgentTool for SearchTool {
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'pattern' parameter".into()))?;
 
-        let search_path = params["path"]
-            .as_str()
-            .map(|s| s.to_string())
-            .or_else(|| self.root.clone())
-            .unwrap_or_else(|| ".".into());
+        let search_path = resolve_directory_path(params["path"].as_str(), self.root.as_deref())?;
 
         let include = params["include"].as_str();
         let case_sensitive = params["case_sensitive"].as_bool().unwrap_or(false);
@@ -102,7 +99,7 @@ impl AgentTool for SearchTool {
         let (cmd_name, args) = if which_exists("rg") {
             build_rg_args(
                 pattern,
-                &search_path,
+                &search_path.display().to_string(),
                 include,
                 case_sensitive,
                 self.max_results,
@@ -110,7 +107,7 @@ impl AgentTool for SearchTool {
         } else {
             build_grep_args(
                 pattern,
-                &search_path,
+                &search_path.display().to_string(),
                 include,
                 case_sensitive,
                 self.max_results,
