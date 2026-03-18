@@ -78,6 +78,11 @@ pub fn run() {
         ))
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
+            agent::commands::agent_chat,
+            agent::commands::agent_stop,
+            agent::commands::agent_authorize_tool,
+            agent::commands::get_tool_permissions,
+            agent::commands::set_tool_permissions,
             commands::chat::send_message,
             commands::chat::send_message_group,
             commands::chat::resend_message,

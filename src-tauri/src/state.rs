@@ -23,6 +23,8 @@ pub struct AppState {
     pub proxy_mode: Mutex<String>,
     /// tool_call_id -> authorization response sender
     pub pending_auth: Mutex<HashMap<String, oneshot::Sender<AuthAction>>>,
+    /// tool_call_id -> conversation_id for scoped cleanup
+    pub pending_auth_conversations: Mutex<HashMap<String, String>>,
     /// (conversation_id, tool_name) -> session-level permission override
     pub session_tool_overrides: Mutex<HashMap<(String, String), PermissionLevel>>,
 }
@@ -38,6 +40,7 @@ impl AppState {
             cancel_tokens: Mutex::new(HashMap::new()),
             proxy_mode: Mutex::new("system".to_string()),
             pending_auth: Mutex::new(HashMap::new()),
+            pending_auth_conversations: Mutex::new(HashMap::new()),
             session_tool_overrides: Mutex::new(HashMap::new()),
         })
     }
@@ -68,10 +71,48 @@ impl AppState {
     }
 
     pub async fn resolve_auth(&self, tool_call_id: &str, action: AuthAction) -> bool {
+        self.pending_auth_conversations
+            .lock()
+            .await
+            .remove(tool_call_id);
         if let Some(tx) = self.pending_auth.lock().await.remove(tool_call_id) {
             tx.send(action).is_ok()
         } else {
             false
+        }
+    }
+
+    pub async fn register_pending_auth(
+        &self,
+        conversation_id: &str,
+        tool_call_id: &str,
+        tx: oneshot::Sender<AuthAction>,
+    ) {
+        self.pending_auth
+            .lock()
+            .await
+            .insert(tool_call_id.to_string(), tx);
+        self.pending_auth_conversations
+            .lock()
+            .await
+            .insert(tool_call_id.to_string(), conversation_id.to_string());
+    }
+
+    pub async fn clear_pending_auth_for_conversation(&self, conversation_id: &str) {
+        let tool_call_ids = {
+            let owners = self.pending_auth_conversations.lock().await;
+            owners
+                .iter()
+                .filter(|(_, owner_conv_id)| *owner_conv_id == conversation_id)
+                .map(|(tool_call_id, _)| tool_call_id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut pending = self.pending_auth.lock().await;
+        let mut owners = self.pending_auth_conversations.lock().await;
+        for tool_call_id in tool_call_ids {
+            pending.remove(&tool_call_id);
+            owners.remove(&tool_call_id);
         }
     }
 
@@ -187,10 +228,16 @@ mod tests {
             .lock()
             .await
             .insert("tool-1".to_string(), tx);
+        state
+            .pending_auth_conversations
+            .lock()
+            .await
+            .insert("tool-1".to_string(), "conv-1".to_string());
 
         assert!(state.resolve_auth("tool-1", AuthAction::Allow).await);
         assert_eq!(rx.await.unwrap(), AuthAction::Allow);
         assert!(state.pending_auth.lock().await.is_empty());
+        assert!(state.pending_auth_conversations.lock().await.is_empty());
         assert!(!state.resolve_auth("tool-1", AuthAction::Deny).await);
     }
 }

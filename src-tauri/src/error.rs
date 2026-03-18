@@ -10,6 +10,10 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("Provider error: {0}")]
     Provider(String),
+    #[error("Agent error: {0}")]
+    Agent(String),
+    #[error("MCP error: {0}")]
+    Mcp(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Not found: {0}")]
