@@ -79,6 +79,11 @@ pub async fn search_messages(
                         version_group_id: row.get(9)?,
                         version_number: row.get::<_, u32>(10).unwrap_or(1),
                         total_versions: row.get::<_, u32>(11).unwrap_or(1),
+                        message_type: crate::models::MessageType::Text,
+                        tool_call_id: None,
+                        tool_name: None,
+                        tool_input: None,
+                        tool_error: false,
                     })
                 },
             )?;
@@ -107,7 +112,7 @@ mod tests {
     use crate::db::conversations;
     use crate::db::messages;
     use crate::db::paste_blobs;
-    use crate::models::{Conversation, MessageStatus};
+    use crate::models::{Conversation, MessageStatus, MessageType};
 
     fn make_conversation(id: &str) -> Conversation {
         Conversation {
@@ -136,6 +141,11 @@ mod tests {
             version_group_id: None,
             version_number: 1,
             total_versions: 1,
+            message_type: MessageType::Text,
+            tool_call_id: None,
+            tool_name: None,
+            tool_input: None,
+            tool_error: false,
         }
     }
 

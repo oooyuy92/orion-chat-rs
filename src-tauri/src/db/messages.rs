@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 use crate::error::AppResult;
-use crate::models::{Message, MessageStatus, Role, SearchSidebarResult};
+use crate::models::{Message, MessageStatus, MessageType, Role, SearchSidebarResult};
 
 fn parse_role(s: &str) -> Role {
     match s {
@@ -55,6 +55,11 @@ fn row_to_message(row: &rusqlite::Row) -> rusqlite::Result<Message> {
         version_group_id: row.get(9)?,
         version_number: row.get::<_, u32>(10).unwrap_or(1),
         total_versions: 1,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
     })
 }
 
@@ -553,6 +558,11 @@ mod tests {
             version_group_id: None,
             version_number: 1,
             total_versions: 1,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
         }
     }
 

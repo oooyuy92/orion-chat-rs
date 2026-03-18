@@ -164,7 +164,7 @@ mod tests {
     use crate::db::Database;
     use crate::db::conversations;
     use crate::db::messages;
-    use crate::models::{Conversation, Message, MessageStatus, Role};
+    use crate::models::{Conversation, Message, MessageStatus, MessageType, Role};
 
     fn make_conversation(id: &str) -> Conversation {
         Conversation {
@@ -193,6 +193,11 @@ mod tests {
             version_group_id: None,
             version_number: 1,
             total_versions: 1,
+            message_type: MessageType::Text,
+            tool_call_id: None,
+            tool_name: None,
+            tool_input: None,
+            tool_error: false,
         }
     }
 
