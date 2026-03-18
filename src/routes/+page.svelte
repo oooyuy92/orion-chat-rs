@@ -1,14 +1,24 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { get } from 'svelte/store';
   import { load as loadStore } from '@tauri-apps/plugin-store';
   import { SidebarProvider, SidebarInset, SidebarTrigger } from '$lib/components/ui/sidebar';
   import AppSidebar from '$lib/components/sidebar/AppSidebar.svelte';
   import ChatArea from '$lib/components/chat/ChatArea.svelte';
+  import ToolAuthDialog from '$lib/components/chat/ToolAuthDialog.svelte';
+  import { agentChat, agentStop } from '$lib/api/agent';
   import { api } from '$lib/utils/invoke';
+  import {
+    addToolCall,
+    agentMode,
+    clearToolCalls,
+    completeToolCall,
+    pendingAuth,
+    updateToolCall,
+  } from '$lib/stores/agent';
   import { titleUpdates, assistantUpdates, conversationCreated, streamingConversations } from '$lib/stores/conversations';
   import { getModelParams } from '$lib/stores/modelParams';
-  import type { ChatEvent } from '$lib/utils/invoke';
-  import type { Assistant, Conversation, Message, ModelGroup, ProviderType } from '$lib/types';
+  import type { Assistant, ChatEvent, Conversation, Message, ModelGroup, ProviderType } from '$lib/types';
   import { i18n } from '$lib/stores/i18n.svelte';
 
   type ConversationSelection = {
@@ -39,6 +49,16 @@
     next.delete(convId);
     streamingConvIds = next;
     streamingConversations.set(streamingConvIds);
+  }
+
+  function markAgentStreaming(convId: string) {
+    agentStreamingConvIds = new Set([...agentStreamingConvIds, convId]);
+  }
+
+  function unmarkAgentStreaming(convId: string) {
+    const next = new Set(agentStreamingConvIds);
+    next.delete(convId);
+    agentStreamingConvIds = next;
   }
 
   type ConvCache = {
@@ -73,6 +93,7 @@
   let lastPromptTokens = $state(0);
   let isCompressing = $state(false);
   let forkedBannerVisible = $state(false);
+  let agentStreamingConvIds = $state<Set<string>>(new Set());
 
   async function loadAutoRenameSettings() {
     try {
@@ -323,6 +344,8 @@ function handleConversationSelect(selection: ConversationSelection) {
   }
 
   invalidateRestore();
+  clearToolCalls();
+  pendingAuth.set(null);
   activeConversationId = selection.conversationId;
   syncCurrentModelToConversation(
     conversations.find((conversation) => conversation.id === selection.conversationId) ?? null,
@@ -462,6 +485,31 @@ function handleConversationSelect(selection: ConversationSelection) {
       case 'started':
         if (convId === activeConversationId) streamingMessageId = event.messageId;
         break;
+      case 'toolCallStart':
+        addToolCall({
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          args: event.args,
+          status: 'running',
+          messageId: event.messageId,
+          startTime: Date.now(),
+        });
+        break;
+      case 'toolCallUpdate':
+        updateToolCall(event.toolCallId, { result: event.partialResult });
+        break;
+      case 'toolCallEnd':
+        completeToolCall(event.toolCallId, event.result, event.isError);
+        break;
+      case 'toolAuthRequest':
+        if (convId === activeConversationId) {
+          pendingAuth.set({
+            toolCallId: event.toolCallId,
+            toolName: event.toolName,
+            args: event.args,
+          });
+        }
+        break;
       case 'delta': {
         const idx = msgs.findIndex((m) => m.id === event.messageId);
         if (idx !== -1) {
@@ -502,6 +550,7 @@ function handleConversationSelect(selection: ConversationSelection) {
           setMessages(convId, updated);
         }
         unmarkStreaming(convId);
+        unmarkAgentStreaming(convId);
         // Only delete cache if this is the active conversation;
         // keep it for background conversations so we can restore on switch-back
         if (convId === activeConversationId) {
@@ -530,6 +579,7 @@ function handleConversationSelect(selection: ConversationSelection) {
           setMessages(convId, updated);
         }
         unmarkStreaming(convId);
+        unmarkAgentStreaming(convId);
         if (convId === activeConversationId) {
           messageCache.delete(convId);
           streamingMessageId = '';
@@ -563,6 +613,13 @@ function handleConversationSelect(selection: ConversationSelection) {
     }
 
     const convId = activeConversationId;
+    const useAgentMode = get(agentMode);
+
+    if (useAgentMode) {
+      clearToolCalls();
+      pendingAuth.set(null);
+      markAgentStreaming(convId);
+    }
 
     // Optimistic user message
     const userMsg: Message = {
@@ -578,6 +635,8 @@ function handleConversationSelect(selection: ConversationSelection) {
       versionGroupId: null,
       versionNumber: 1,
       totalVersions: 1,
+      messageType: 'text',
+      toolError: false,
     };
     messages = [...messages, userMsg];
 
@@ -595,35 +654,42 @@ function handleConversationSelect(selection: ConversationSelection) {
       versionGroupId: null,
       versionNumber: 1,
       totalVersions: 1,
+      messageType: 'text',
+      toolError: false,
     };
     messages = [...messages, assistantMsg];
     streamingMessageId = assistantMsg.id;
     markStreaming(convId);
 
     try {
-      const params = await loadParamsForModel(currentModelId);
-      await api.sendMessage(
-        convId,
-        content,
-        currentModelId,
-        (event) => {
-          // Update the streaming message ID to the real one from backend
-          if (event.type === 'started') {
-            const msgs = getMessages(convId);
-            const idx = msgs.findIndex((m) => m.id === assistantMsg.id);
-            if (idx !== -1) {
-              const updated = [...msgs];
-              updated[idx] = { ...updated[idx], id: event.messageId };
-              setMessages(convId, updated);
-            }
-            if (convId === activeConversationId) streamingMessageId = event.messageId;
-          } else {
-            handleEventFor(convId, event);
+      const onEvent = (event: ChatEvent) => {
+        if (event.type === 'started') {
+          const msgs = getMessages(convId);
+          const idx = msgs.findIndex((m) => m.id === assistantMsg.id);
+          if (idx !== -1) {
+            const updated = [...msgs];
+            updated[idx] = { ...updated[idx], id: event.messageId };
+            setMessages(convId, updated);
           }
-        },
-        params.common,
-        params.providerParams,
-      );
+          if (convId === activeConversationId) streamingMessageId = event.messageId;
+        } else {
+          handleEventFor(convId, event);
+        }
+      };
+
+      if (useAgentMode) {
+        await agentChat(convId, content, currentModelId, onEvent);
+      } else {
+        const params = await loadParamsForModel(currentModelId);
+        await api.sendMessage(
+          convId,
+          content,
+          currentModelId,
+          onEvent,
+          params.common,
+          params.providerParams,
+        );
+      }
       // Reload messages from DB to sync IDs (only if still active)
       if (convId === activeConversationId) {
         await loadLatestMessages(convId);
@@ -645,6 +711,7 @@ function handleConversationSelect(selection: ConversationSelection) {
         setMessages(convId, updated);
       }
       unmarkStreaming(convId);
+      unmarkAgentStreaming(convId);
       if (convId === activeConversationId) streamingMessageId = '';
     }
   }
@@ -656,7 +723,12 @@ function handleConversationSelect(selection: ConversationSelection) {
   async function handleStop() {
     if (!isStreaming) return;
     try {
-      await api.stopGeneration(activeConversationId);
+      if (agentStreamingConvIds.has(activeConversationId)) {
+        pendingAuth.set(null);
+        await agentStop(activeConversationId);
+      } else {
+        await api.stopGeneration(activeConversationId);
+      }
     } catch (e) {
       console.error('Failed to stop generation:', e);
     }
@@ -711,6 +783,8 @@ function handleConversationSelect(selection: ConversationSelection) {
         versionGroupId: null,
         versionNumber: 1,
         totalVersions: 1,
+        messageType: 'text',
+        toolError: false,
       };
       messages = [...messages, assistantMsg];
       streamingMessageId = assistantMsg.id;
@@ -820,6 +894,8 @@ function handleConversationSelect(selection: ConversationSelection) {
         versionGroupId: null,
         versionNumber: 1,
         totalVersions: versionModels.length,
+        messageType: 'text',
+        toolError: false,
       };
       messages = [...messages, assistantMsg];
       streamingMessageId = assistantMsg.id;
@@ -875,6 +951,8 @@ function handleConversationSelect(selection: ConversationSelection) {
           versionGroupId: currentAiMsg.versionGroupId || currentAiMsg.id,
           versionNumber: i + 1,
           totalVersions: versionModels.length,
+          messageType: 'text',
+          toolError: false,
         };
 
         const aiIdx = currentMsgs.findIndex((m) => m.id === currentAiMsg.id);
@@ -1002,6 +1080,8 @@ function handleConversationSelect(selection: ConversationSelection) {
         versionGroupId: currentMsg.versionGroupId || currentMsg.id,
         versionNumber: currentMsg.totalVersions + 1,
         totalVersions: currentMsg.totalVersions + 1,
+        messageType: 'text',
+        toolError: false,
       };
 
       // Replace current message with placeholder, remove everything after
@@ -1074,6 +1154,8 @@ function handleConversationSelect(selection: ConversationSelection) {
       versionGroupId: null,
       versionNumber: 1,
       totalVersions: 1,
+      messageType: 'text',
+      toolError: false,
     };
     messages = [...messages, userMsg];
 
@@ -1092,6 +1174,8 @@ function handleConversationSelect(selection: ConversationSelection) {
       versionGroupId: null,
       versionNumber: idx + 1,
       totalVersions: modelIds.length,
+      messageType: 'text' as const,
+      toolError: false,
     }));
     groupStreamingMessages = [...placeholders];
     markStreaming(convId);
@@ -1117,6 +1201,10 @@ function handleConversationSelect(selection: ConversationSelection) {
               };
               groupStreamingMessages = [...groupStreamingMessages];
             }
+            return;
+          }
+
+          if (event.type === 'toolAuthRequest') {
             return;
           }
 
@@ -1298,6 +1386,8 @@ function handleConversationSelect(selection: ConversationSelection) {
     {/if}
   </SidebarInset>
 </SidebarProvider>
+
+<ToolAuthDialog />
 
 <style>
   .expand-sidebar-trigger-wrapper {

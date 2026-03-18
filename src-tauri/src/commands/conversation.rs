@@ -5,7 +5,7 @@ use tauri::State;
 
 use crate::db;
 use crate::error::{AppError, AppResult};
-use crate::models::{Conversation, Message, MessageStatus, PagedMessages, Role};
+use crate::models::{Conversation, Message, MessageStatus, MessageType, PagedMessages, Role};
 use crate::paste_storage;
 
 /// Lightweight version info for version tabs.
@@ -562,6 +562,11 @@ pub async fn fork_conversation(
                 version_group_id: None,
                 version_number: 1,
                 total_versions: 1,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
             };
             db::messages::create(conn, &new_msg)?;
         }
@@ -620,6 +625,11 @@ mod tests {
             version_group_id: None,
             version_number: 1,
             total_versions: 1,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
         }
     }
 

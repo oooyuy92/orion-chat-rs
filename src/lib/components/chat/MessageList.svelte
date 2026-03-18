@@ -1,8 +1,11 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { Message } from '$lib/types';
-  import MessageBubble from './MessageBubble.svelte';
+  import { activeToolCalls } from '$lib/stores/agent';
   import { i18n } from '$lib/stores/i18n.svelte';
+  import { buildMessageRows } from './agentTimeline';
+  import MessageBubble from './MessageBubble.svelte';
+  import ToolTimeline from './ToolTimeline.svelte';
   import {
     calculateVirtualWindow,
     getAdjustedScrollTopAfterPrepend,
@@ -71,10 +74,11 @@
   let lastFocusedMessageId = $state('');
   let highlightTimer = $state<ReturnType<typeof setTimeout> | null>(null);
 
+  const displayRows = $derived(buildMessageRows(messages, $activeToolCalls));
   const isLastMessageStreaming = $derived(
-    messages.length > 0 && messages[messages.length - 1].status === 'streaming',
+    displayRows.length > 0 && displayRows[displayRows.length - 1].message.status === 'streaming',
   );
-  const messageIds = $derived(messages.map((message) => message.id));
+  const messageIds = $derived(displayRows.map((row) => row.message.id));
   const virtualWindow = $derived(
     calculateVirtualWindow({
       itemKeys: messageIds,
@@ -85,7 +89,7 @@
       estimatedItemHeight: ESTIMATED_ROW_HEIGHT,
     }),
   );
-  const visibleMessages = $derived(messages.slice(virtualWindow.startIndex, virtualWindow.endIndex));
+  const visibleRows = $derived(displayRows.slice(virtualWindow.startIndex, virtualWindow.endIndex));
 
   let scrollStateRafId = 0;
 
@@ -115,67 +119,67 @@
     notifyScrollState();
   }
 
-function scrollToBottom() {
-  if (!container) return;
-  container.scrollTop = container.scrollHeight;
-  syncScrollMetrics();
-}
-
-export function jumpToIndex(index: number) {
-  if (!container || index < 0 || index >= messages.length) return;
-  const offset = estimateOffsetForIndex(index);
-  container.scrollTo({ top: offset, behavior: 'smooth' });
-}
-
-export function jumpToTop() {
-  if (!container) return;
-  container.scrollTo({ top: 0, behavior: 'smooth' });
-}
-
-export function jumpToBottom() {
-  if (!container) return;
-  container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
-}
-
-function estimateOffsetForIndex(index: number) {
-  return messageIds
-    .slice(0, index)
-    .reduce((sum, messageId) => sum + (heightCache.get(messageId) ?? ESTIMATED_ROW_HEIGHT), 0);
-}
-
-function highlightFocusedMessage(messageId: string) {
-  highlightedMessageId = messageId;
-  if (highlightTimer) {
-    clearTimeout(highlightTimer);
-  }
-  highlightTimer = setTimeout(() => {
-    if (highlightedMessageId === messageId) {
-      highlightedMessageId = '';
-    }
-  }, 1800);
-}
-
-function scrollToFocusedMessage(messageId: string) {
-  if (!container) return;
-  const index = messages.findIndex((message) => message.id === messageId);
-  if (index === -1) return;
-
-  const estimatedHeight = heightCache.get(messageId) ?? ESTIMATED_ROW_HEIGHT;
-  const estimatedTop = estimateOffsetForIndex(index);
-  container.scrollTop = Math.max(
-    0,
-    estimatedTop - Math.max((container.clientHeight - estimatedHeight) / 2, 0),
-  );
-  syncScrollMetrics();
-
-  void tick().then(() => {
+  function scrollToBottom() {
     if (!container) return;
-    const row = container.querySelector(`[data-message-id="${messageId}"]`) as HTMLDivElement | null;
-    row?.scrollIntoView({ block: 'center' });
+    container.scrollTop = container.scrollHeight;
     syncScrollMetrics();
-    highlightFocusedMessage(messageId);
-  });
-}
+  }
+
+  export function jumpToIndex(index: number) {
+    if (!container || index < 0 || index >= displayRows.length) return;
+    const offset = estimateOffsetForIndex(index);
+    container.scrollTo({ top: offset, behavior: 'smooth' });
+  }
+
+  export function jumpToTop() {
+    if (!container) return;
+    container.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  export function jumpToBottom() {
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+  }
+
+  function estimateOffsetForIndex(index: number) {
+    return messageIds
+      .slice(0, index)
+      .reduce((sum, messageId) => sum + (heightCache.get(messageId) ?? ESTIMATED_ROW_HEIGHT), 0);
+  }
+
+  function highlightFocusedMessage(messageId: string) {
+    highlightedMessageId = messageId;
+    if (highlightTimer) {
+      clearTimeout(highlightTimer);
+    }
+    highlightTimer = setTimeout(() => {
+      if (highlightedMessageId === messageId) {
+        highlightedMessageId = '';
+      }
+    }, 1800);
+  }
+
+  function scrollToFocusedMessage(messageId: string) {
+    if (!container) return;
+    const index = displayRows.findIndex((row) => row.message.id === messageId);
+    if (index === -1) return;
+
+    const estimatedHeight = heightCache.get(messageId) ?? ESTIMATED_ROW_HEIGHT;
+    const estimatedTop = estimateOffsetForIndex(index);
+    container.scrollTop = Math.max(
+      0,
+      estimatedTop - Math.max((container.clientHeight - estimatedHeight) / 2, 0),
+    );
+    syncScrollMetrics();
+
+    void tick().then(() => {
+      if (!container) return;
+      const row = container.querySelector(`[data-message-id="${messageId}"]`) as HTMLDivElement | null;
+      row?.scrollIntoView({ block: 'center' });
+      syncScrollMetrics();
+      highlightFocusedMessage(messageId);
+    });
+  }
 
   function handleScroll() {
     if (!container) return;
@@ -291,22 +295,22 @@ function scrollToFocusedMessage(messageId: string) {
     }
   });
 
-$effect(() => {
-  if (!focusedMessageId || !container || focusedMessageId === lastFocusedMessageId) {
-    return;
-  }
+  $effect(() => {
+    if (!focusedMessageId || !container || focusedMessageId === lastFocusedMessageId) {
+      return;
+    }
 
-  if (!messages.some((message) => message.id === focusedMessageId)) {
-    return;
-  }
+    if (!displayRows.some((row) => row.message.id === focusedMessageId)) {
+      return;
+    }
 
-  lastFocusedMessageId = focusedMessageId;
-  scrollToFocusedMessage(focusedMessageId);
-});
+    lastFocusedMessageId = focusedMessageId;
+    scrollToFocusedMessage(focusedMessageId);
+  });
 
-$effect(() => {
-  const currentCount = messages.length;
-    const currentLastMessageId = messages.at(-1)?.id ?? null;
+  $effect(() => {
+    const currentCount = displayRows.length;
+    const currentLastMessageId = displayRows.at(-1)?.message.id ?? null;
 
     if (!container) {
       previousMessageCount = currentCount;
@@ -340,7 +344,10 @@ $effect(() => {
     const didAppendMessages = currentCount > previousMessageCount;
     const didReplaceTail = currentLastMessageId !== previousLastMessageId;
 
-    if (previousMessageCount === 0 || ((didAppendMessages || didReplaceTail) && (shouldFollowBottom || isLastMessageStreaming))) {
+    if (
+      previousMessageCount === 0 ||
+      ((didAppendMessages || didReplaceTail) && (shouldFollowBottom || isLastMessageStreaming))
+    ) {
       void tick().then(scrollToBottom);
     }
 
@@ -355,7 +362,7 @@ $effect(() => {
       <div class="loading-older-state">{i18n.t.loadingOlderMessages}</div>
     {/if}
 
-    {#if messages.length === 0}
+    {#if displayRows.length === 0}
       <div class="empty-message-state">
         <h2>{i18n.t.noMessagesYet}</h2>
         <p>{i18n.t.askAnything}</p>
@@ -365,8 +372,15 @@ $effect(() => {
         <div class="conversation-spacer" style:height="{virtualWindow.topSpacerHeight}px"></div>
       {/if}
 
-      {#each visibleMessages as message (message.id)}
-        <div class="message-row" class:message-row-highlighted={highlightedMessageId === message.id} data-message-id={message.id} use:measureRow={message.id}>
+      {#each visibleRows as row (row.message.id)}
+        {@const message = row.message}
+        <div
+          class="message-row"
+          class:message-row-highlighted={highlightedMessageId === message.id}
+          data-message-id={message.id}
+          use:measureRow={message.id}
+        >
+          <ToolTimeline calls={row.timelineCalls} />
           <MessageBubble {message} {onAction} {disabled} />
         </div>
       {/each}

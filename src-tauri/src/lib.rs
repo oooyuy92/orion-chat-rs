@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod commands;
 pub mod db;
 pub mod error;
@@ -77,6 +78,17 @@ pub fn run() {
         ))
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
+            agent::commands::agent_chat,
+            agent::commands::agent_stop,
+            agent::commands::agent_authorize_tool,
+            agent::commands::get_tool_permissions,
+            agent::commands::set_tool_permissions,
+            agent::commands::get_skills_dir,
+            agent::commands::set_skills_dir,
+            agent::commands::scan_skills,
+            agent::commands::add_mcp_server,
+            agent::commands::remove_mcp_server,
+            agent::commands::list_mcp_servers,
             commands::chat::send_message,
             commands::chat::send_message_group,
             commands::chat::resend_message,

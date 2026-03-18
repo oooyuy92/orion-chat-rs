@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 
 use crate::error::AppResult;
-use crate::models::{Message, MessageStatus, Role, SearchSidebarResult};
+use crate::models::{Message, MessageStatus, MessageType, Role, SearchSidebarResult};
 
 fn parse_role(s: &str) -> Role {
     match s {
@@ -28,6 +28,14 @@ fn parse_status(s: &str) -> MessageStatus {
     }
 }
 
+fn parse_message_type(s: &str) -> MessageType {
+    match s {
+        "tool_call" => MessageType::ToolCall,
+        "tool_result" => MessageType::ToolResult,
+        _ => MessageType::Text,
+    }
+}
+
 fn status_to_str(status: &MessageStatus) -> &'static str {
     match status {
         MessageStatus::Streaming => "streaming",
@@ -37,11 +45,12 @@ fn status_to_str(status: &MessageStatus) -> &'static str {
 }
 
 const SELECT_COLS: &str =
-    "id, conversation_id, content, role, model_id, reasoning, token_completion, created_at, status, version_group_id, version_number";
+    "id, conversation_id, content, role, model_id, reasoning, token_completion, created_at, status, message_type, tool_call_id, tool_name, tool_input, tool_error, version_group_id, version_number";
 
 fn row_to_message(row: &rusqlite::Row) -> rusqlite::Result<Message> {
     let role_str: String = row.get(3)?;
     let status_str: String = row.get(8)?;
+    let message_type_str: String = row.get(9)?;
     Ok(Message {
         id: row.get(0)?,
         conversation_id: row.get(1)?,
@@ -52,15 +61,20 @@ fn row_to_message(row: &rusqlite::Row) -> rusqlite::Result<Message> {
         token_count: row.get(6)?,
         status: parse_status(&status_str),
         created_at: row.get(7)?,
-        version_group_id: row.get(9)?,
-        version_number: row.get::<_, u32>(10).unwrap_or(1),
+        version_group_id: row.get(14)?,
+        version_number: row.get::<_, u32>(15).unwrap_or(1),
         total_versions: 1,
+        message_type: parse_message_type(&message_type_str),
+        tool_call_id: row.get(10)?,
+        tool_name: row.get(11)?,
+        tool_input: row.get(12)?,
+        tool_error: row.get::<_, i64>(13).unwrap_or(0) != 0,
     })
 }
 
 fn row_to_message_with_total(row: &rusqlite::Row) -> rusqlite::Result<Message> {
     let mut msg = row_to_message(row)?;
-    msg.total_versions = row.get::<_, u32>(11).unwrap_or(1);
+    msg.total_versions = row.get::<_, u32>(16).unwrap_or(1);
     Ok(msg)
 }
 
@@ -481,7 +495,9 @@ pub fn soft_delete_version(conn: &Connection, id: &str) -> AppResult<Option<Stri
 
 pub fn search(conn: &Connection, query: &str) -> AppResult<Vec<Message>> {
     let mut stmt = conn.prepare(
-        "SELECT m.id, m.conversation_id, m.content, m.role, m.model_id, m.reasoning, m.token_completion, m.created_at, m.status, m.version_group_id, m.version_number, 1 as total_versions
+        "SELECT m.id, m.conversation_id, m.content, m.role, m.model_id, m.reasoning, m.token_completion, m.created_at, m.status,
+                m.message_type, m.tool_call_id, m.tool_name, m.tool_input, m.tool_error, m.version_group_id, m.version_number,
+                1 as total_versions
          FROM messages m
          JOIN messages_fts fts ON m.rowid = fts.rowid
          WHERE messages_fts MATCH ?1 AND m.deleted_at IS NULL AND m.is_active_version = 1
@@ -553,6 +569,11 @@ mod tests {
             version_group_id: None,
             version_number: 1,
             total_versions: 1,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
         }
     }
 

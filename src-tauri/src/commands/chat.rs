@@ -291,6 +291,11 @@ async fn do_stream(
         version_group_id: None,
         version_number: 1,
         total_versions: 1,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
     };
     state
         .db
@@ -343,6 +348,11 @@ pub async fn send_message(
         version_group_id: None,
         version_number: 1,
         total_versions: 1,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
     };
     state
         .db
@@ -438,6 +448,11 @@ pub async fn generate_version(
         version_group_id: Some(version_group_id.clone()),
         version_number: next_version,
         total_versions: 0,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
     };
     state
         .db
@@ -614,6 +629,11 @@ pub async fn compress_conversation(
                 version_group_id: None,
                 version_number: 1,
                 total_versions: 1,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
             };
             state
                 .db
@@ -680,6 +700,11 @@ pub async fn send_message_group(
         version_group_id: None,
         version_number: 1,
         total_versions: 1,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
     };
     state
         .db
@@ -712,6 +737,11 @@ pub async fn send_message_group(
         version_group_id: None,
         version_number: 1,
         total_versions: model_ids.len() as u32,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
     };
     state
         .db
@@ -739,6 +769,11 @@ pub async fn send_message_group(
             version_group_id: Some(first_msg_id.clone()),
             version_number: (idx + 1) as u32,
             total_versions: model_ids.len() as u32,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
         };
         state
             .db
@@ -959,6 +994,11 @@ mod tests {
             version_group_id: None,
             version_number: 1,
             total_versions: 1,
+        message_type: MessageType::Text,
+        tool_call_id: None,
+        tool_name: None,
+        tool_input: None,
+        tool_error: false,
         }
     }
 

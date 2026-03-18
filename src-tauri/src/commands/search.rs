@@ -6,7 +6,7 @@ use tauri::State;
 
 use crate::db;
 use crate::error::AppResult;
-use crate::models::{Message, Role, SearchSidebarResult};
+use crate::models::{Message, MessageType, Role, SearchSidebarResult};
 use crate::state::AppState;
 
 fn search_sidebar_results_with_conn(
@@ -50,7 +50,7 @@ pub async fn search_messages(
         let mut seen = results.iter().map(|message| message.id.clone()).collect::<HashSet<_>>();
         for message_id in db::paste_blobs::search_message_ids(conn, &query)? {
             let message = conn.query_row(
-                "SELECT id, conversation_id, content, role, model_id, reasoning, token_completion, created_at, status, version_group_id, version_number,
+                "SELECT id, conversation_id, content, role, model_id, reasoning, token_completion, created_at, status, message_type, tool_call_id, tool_name, tool_input, tool_error, version_group_id, version_number,
                    CASE WHEN version_group_id IS NULL THEN 1
                    ELSE (SELECT COUNT(*) FROM messages m2 WHERE m2.version_group_id = messages.version_group_id AND m2.deleted_at IS NULL)
                    END as total_versions
@@ -76,9 +76,18 @@ pub async fn search_messages(
                             "error" => crate::models::MessageStatus::Error,
                             _ => crate::models::MessageStatus::Done,
                         },
-                        version_group_id: row.get(9)?,
-                        version_number: row.get::<_, u32>(10).unwrap_or(1),
-                        total_versions: row.get::<_, u32>(11).unwrap_or(1),
+                        message_type: match row.get::<_, String>(9)?.as_str() {
+                            "tool_call" => MessageType::ToolCall,
+                            "tool_result" => MessageType::ToolResult,
+                            _ => MessageType::Text,
+                        },
+                        tool_call_id: row.get(10)?,
+                        tool_name: row.get(11)?,
+                        tool_input: row.get(12)?,
+                        tool_error: row.get::<_, i64>(13).unwrap_or(0) != 0,
+                        version_group_id: row.get(14)?,
+                        version_number: row.get::<_, u32>(15).unwrap_or(1),
+                        total_versions: row.get::<_, u32>(16).unwrap_or(1),
                     })
                 },
             )?;
@@ -107,7 +116,7 @@ mod tests {
     use crate::db::conversations;
     use crate::db::messages;
     use crate::db::paste_blobs;
-    use crate::models::{Conversation, MessageStatus};
+    use crate::models::{Conversation, MessageStatus, MessageType};
 
     fn make_conversation(id: &str) -> Conversation {
         Conversation {
@@ -136,6 +145,11 @@ mod tests {
             version_group_id: None,
             version_number: 1,
             total_versions: 1,
+            message_type: MessageType::Text,
+            tool_call_id: None,
+            tool_name: None,
+            tool_input: None,
+            tool_error: false,
         }
     }
 

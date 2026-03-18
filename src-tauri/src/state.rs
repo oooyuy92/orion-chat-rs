@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
+use yoagent::mcp::McpClient;
 
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
-use crate::models::ProviderType;
+use crate::models::{AuthAction, PermissionLevel, ProviderType};
 use crate::providers::anthropic::AnthropicProvider;
 use crate::providers::gemini::GeminiProvider;
 use crate::providers::ollama::OllamaProvider;
@@ -21,6 +22,13 @@ pub struct AppState {
     pub cancel_tokens: Mutex<HashMap<String, watch::Sender<bool>>>,
     /// "system" | "none"
     pub proxy_mode: Mutex<String>,
+    /// tool_call_id -> authorization response sender
+    pub pending_auth: Mutex<HashMap<String, oneshot::Sender<AuthAction>>>,
+    /// tool_call_id -> conversation_id for scoped cleanup
+    pub pending_auth_conversations: Mutex<HashMap<String, String>>,
+    /// (conversation_id, tool_name) -> session-level permission override
+    pub session_tool_overrides: Mutex<HashMap<(String, String), PermissionLevel>>,
+    pub mcp_clients: Mutex<HashMap<String, Arc<Mutex<McpClient>>>>,
 }
 
 impl AppState {
@@ -33,6 +41,10 @@ impl AppState {
             providers: Mutex::new(HashMap::new()),
             cancel_tokens: Mutex::new(HashMap::new()),
             proxy_mode: Mutex::new("system".to_string()),
+            pending_auth: Mutex::new(HashMap::new()),
+            pending_auth_conversations: Mutex::new(HashMap::new()),
+            session_tool_overrides: Mutex::new(HashMap::new()),
+            mcp_clients: Mutex::new(HashMap::new()),
         })
     }
 
@@ -59,6 +71,76 @@ impl AppState {
             .lock()
             .await
             .remove(conversation_id);
+    }
+
+    pub async fn resolve_auth(&self, tool_call_id: &str, action: AuthAction) -> bool {
+        self.pending_auth_conversations
+            .lock()
+            .await
+            .remove(tool_call_id);
+        if let Some(tx) = self.pending_auth.lock().await.remove(tool_call_id) {
+            tx.send(action).is_ok()
+        } else {
+            false
+        }
+    }
+
+    pub async fn register_pending_auth(
+        &self,
+        conversation_id: &str,
+        tool_call_id: &str,
+        tx: oneshot::Sender<AuthAction>,
+    ) {
+        self.pending_auth
+            .lock()
+            .await
+            .insert(tool_call_id.to_string(), tx);
+        self.pending_auth_conversations
+            .lock()
+            .await
+            .insert(tool_call_id.to_string(), conversation_id.to_string());
+    }
+
+    pub async fn clear_pending_auth_for_conversation(&self, conversation_id: &str) {
+        let tool_call_ids = {
+            let owners = self.pending_auth_conversations.lock().await;
+            owners
+                .iter()
+                .filter(|(_, owner_conv_id)| *owner_conv_id == conversation_id)
+                .map(|(tool_call_id, _)| tool_call_id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut pending = self.pending_auth.lock().await;
+        let mut owners = self.pending_auth_conversations.lock().await;
+        for tool_call_id in tool_call_ids {
+            pending.remove(&tool_call_id);
+            owners.remove(&tool_call_id);
+        }
+    }
+
+    pub async fn set_session_override(
+        &self,
+        conversation_id: &str,
+        tool_name: &str,
+        level: PermissionLevel,
+    ) {
+        self.session_tool_overrides.lock().await.insert(
+            (conversation_id.to_string(), tool_name.to_string()),
+            level,
+        );
+    }
+
+    pub async fn get_session_override(
+        &self,
+        conversation_id: &str,
+        tool_name: &str,
+    ) -> Option<PermissionLevel> {
+        self.session_tool_overrides
+            .lock()
+            .await
+            .get(&(conversation_id.to_string(), tool_name.to_string()))
+            .cloned()
     }
 
     pub async fn register_provider(
@@ -112,5 +194,60 @@ impl AppState {
 
     pub async fn unregister_provider(&self, id: &str) {
         self.providers.lock().await.remove(id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> AppState {
+        AppState::new(":memory:", "/tmp").unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_session_override_round_trip() {
+        let state = test_state();
+
+        assert_eq!(state.get_session_override("conv-1", "bash").await, None);
+
+        state
+            .set_session_override("conv-1", "bash", PermissionLevel::Auto)
+            .await;
+
+        assert_eq!(
+            state.get_session_override("conv-1", "bash").await,
+            Some(PermissionLevel::Auto)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_auth_sends_response_and_clears_pending_entry() {
+        let state = test_state();
+        let (tx, rx) = oneshot::channel();
+
+        state
+            .pending_auth
+            .lock()
+            .await
+            .insert("tool-1".to_string(), tx);
+        state
+            .pending_auth_conversations
+            .lock()
+            .await
+            .insert("tool-1".to_string(), "conv-1".to_string());
+
+        assert!(state.resolve_auth("tool-1", AuthAction::Allow).await);
+        assert_eq!(rx.await.unwrap(), AuthAction::Allow);
+        assert!(state.pending_auth.lock().await.is_empty());
+        assert!(state.pending_auth_conversations.lock().await.is_empty());
+        assert!(!state.resolve_auth("tool-1", AuthAction::Deny).await);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_clients_start_empty() {
+        let state = test_state();
+
+        assert!(state.mcp_clients.lock().await.is_empty());
     }
 }
