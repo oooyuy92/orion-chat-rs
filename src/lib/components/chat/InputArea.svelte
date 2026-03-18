@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { ModelGroup, ProviderType } from '$lib/types';
+  import { agentMode } from '$lib/stores/agent';
+  import AgentToggle from './AgentToggle.svelte';
   import ModelSelector from './ModelSelector.svelte';
   import ModelParamsPopover from './ModelParamsPopover.svelte';
   import ComboSelector from './ComboSelector.svelte';
@@ -127,7 +129,7 @@
   function submit() {
     const content = getContent().trim();
     if (!content || disabled) return;
-    if (activeComboModelIds && activeComboModelIds.length > 1) {
+    if (!$agentMode && activeComboModelIds && activeComboModelIds.length > 1) {
       onGroupSend?.(content, activeComboModelIds);
     } else {
       onSend(content);
@@ -169,6 +171,7 @@
       onSelectCombo={(modelIds) => (activeComboModelIds = modelIds)}
       onClearCombo={() => (activeComboModelIds = null)}
     />
+    <AgentToggle {disabled} />
   </div>
 
   <div class="input-group">
