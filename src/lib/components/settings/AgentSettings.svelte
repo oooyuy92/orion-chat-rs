@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import McpServerManager from './McpServerManager.svelte';
   import ToolPermissionRow from './ToolPermissionRow.svelte';
   import SkillsManager from './SkillsManager.svelte';
   import type { PermissionLevel, ToolPermissions } from '$lib/types';
@@ -48,6 +49,11 @@
     <section>
       <h3 class="mb-3 text-sm font-semibold">Skills</h3>
       <SkillsManager />
+    </section>
+
+    <section>
+      <h3 class="text-sm font-semibold mb-3">MCP 服务器</h3>
+      <McpServerManager />
     </section>
   </div>
 {/if}
