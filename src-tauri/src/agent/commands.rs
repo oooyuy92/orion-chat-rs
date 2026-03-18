@@ -12,11 +12,22 @@ use yoagent::{
 
 use crate::agent::config;
 use crate::agent::events::handle_agent_event;
+use crate::agent::mcp;
 use crate::agent::permissions::{ChatEventEmitter, PermissionedTool};
 use crate::agent::skills::{self, SkillInfo};
 use crate::db;
 use crate::error::{AppError, AppResult};
-use crate::models::{AuthAction, ChatEvent, Message, MessageStatus, MessageType, Role, ToolPermissions};
+use crate::models::{
+    AuthAction,
+    ChatEvent,
+    McpServerConfig,
+    McpServerStatus,
+    Message,
+    MessageStatus,
+    MessageType,
+    Role,
+    ToolPermissions,
+};
 use crate::state::AppState;
 
 #[derive(Debug, PartialEq)]
@@ -88,7 +99,8 @@ pub async fn agent_chat(
             permissions,
             emit_event.clone(),
             &working_dir,
-        ),
+        )
+        .await?,
     };
 
     let cancel_rx = app_state.create_cancel_token(&conversation_id).await;
@@ -233,6 +245,49 @@ pub async fn scan_skills(state: State<'_, Arc<AppState>>) -> AppResult<Vec<Skill
     skills::scan_skills_dir(&dir)
 }
 
+#[tauri::command]
+pub async fn add_mcp_server(
+    state: State<'_, Arc<AppState>>,
+    config: McpServerConfig,
+) -> AppResult<Vec<String>> {
+    let mut configs = load_mcp_server_configs(&state)?;
+    if configs.iter().any(|existing| existing.name == config.name) {
+        return Err(AppError::Mcp(format!(
+            "MCP server {} already exists",
+            config.name
+        )));
+    }
+
+    configs.push(config.clone());
+    save_mcp_server_configs(&state, &configs)?;
+
+    mcp::connect_server(&state, config).await
+}
+
+#[tauri::command]
+pub async fn remove_mcp_server(
+    state: State<'_, Arc<AppState>>,
+    name: String,
+) -> AppResult<()> {
+    let mut configs = load_mcp_server_configs(&state)?;
+    if !configs.iter().any(|config| config.name == name) {
+        return Err(AppError::NotFound(format!("MCP server {name}")));
+    }
+
+    mcp::disconnect_server(&state, &name).await?;
+
+    configs.retain(|config| config.name != name);
+    save_mcp_server_configs(&state, &configs)
+}
+
+#[tauri::command]
+pub async fn list_mcp_servers(
+    state: State<'_, Arc<AppState>>,
+) -> AppResult<Vec<McpServerStatus>> {
+    let configs = load_mcp_server_configs(&state)?;
+    Ok(mcp::get_server_statuses(&state, &configs).await)
+}
+
 fn load_tool_permissions(state: &AppState) -> AppResult<ToolPermissions> {
     let permissions_json = state.db.with_conn(|conn| {
         conn.query_row(
@@ -244,6 +299,31 @@ fn load_tool_permissions(state: &AppState) -> AppResult<ToolPermissions> {
     })?;
 
     serde_json::from_str(&permissions_json).map_err(Into::into)
+}
+
+fn load_mcp_server_configs(state: &AppState) -> AppResult<Vec<McpServerConfig>> {
+    let configs_json = state.db.with_conn(|conn| {
+        Ok(conn
+            .query_row(
+                "SELECT value FROM agent_settings WHERE key = 'mcp_servers'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|_| "[]".to_string()))
+    })?;
+
+    serde_json::from_str(&configs_json).map_err(Into::into)
+}
+
+fn save_mcp_server_configs(state: &AppState, configs: &[McpServerConfig]) -> AppResult<()> {
+    let configs_json = serde_json::to_string(configs)?;
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT OR REPLACE INTO agent_settings (key, value) VALUES ('mcp_servers', ?1)",
+            [configs_json],
+        )?;
+        Ok(())
+    })
 }
 
 fn load_working_dir(state: &AppState) -> AppResult<String> {
@@ -266,13 +346,13 @@ fn load_working_dir(state: &AppState) -> AppResult<String> {
     }
 }
 
-fn build_tools(
+async fn build_tools(
     state: Arc<AppState>,
     conversation_id: &str,
     permissions: ToolPermissions,
     emit_event: ChatEventEmitter,
     working_dir: &str,
-) -> Vec<Box<dyn yoagent::AgentTool>> {
+) -> AppResult<Vec<Box<dyn yoagent::AgentTool>>> {
     let make_tool = |tool: Box<dyn yoagent::AgentTool>| {
         Box::new(PermissionedTool::new(
             tool,
@@ -283,7 +363,7 @@ fn build_tools(
         )) as Box<dyn yoagent::AgentTool>
     };
 
-    vec![
+    let mut tools = vec![
         make_tool(Box::new(BashTool::new().with_cwd(working_dir.to_string()))),
         make_tool(Box::new(
             ReadFileTool::new().with_allowed_paths(vec![working_dir.to_string()]),
@@ -298,7 +378,12 @@ fn build_tools(
             ListFilesTool::new().with_root(working_dir.to_string()),
         )),
         make_tool(Box::new(SearchTool::new().with_root(working_dir.to_string()))),
-    ]
+    ];
+
+    let mcp_tools = mcp::get_mcp_tools(&state).await?;
+    tools.extend(mcp_tools);
+
+    Ok(tools)
 }
 
 fn load_conversation_messages(db: &crate::db::Database, conversation_id: &str) -> AppResult<Vec<AgentMessage>> {
@@ -590,7 +675,9 @@ mod tests {
             ToolPermissions::with_defaults(),
             Arc::new(|_| {}),
             &working_dir.display().to_string(),
-        );
+        )
+        .await
+        .unwrap();
         let read_tool = tools
             .into_iter()
             .find(|tool| tool.name() == "read_file")
@@ -623,7 +710,9 @@ mod tests {
             ToolPermissions::with_defaults(),
             Arc::new(|_| {}),
             &working_dir.display().to_string(),
-        );
+        )
+        .await
+        .unwrap();
         let list_tool = tools
             .into_iter()
             .find(|tool| tool.name() == "list_files")

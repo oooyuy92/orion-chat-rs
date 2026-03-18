@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{oneshot, watch, Mutex};
+use yoagent::mcp::McpClient;
 
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
@@ -27,6 +28,7 @@ pub struct AppState {
     pub pending_auth_conversations: Mutex<HashMap<String, String>>,
     /// (conversation_id, tool_name) -> session-level permission override
     pub session_tool_overrides: Mutex<HashMap<(String, String), PermissionLevel>>,
+    pub mcp_clients: Mutex<HashMap<String, Arc<Mutex<McpClient>>>>,
 }
 
 impl AppState {
@@ -42,6 +44,7 @@ impl AppState {
             pending_auth: Mutex::new(HashMap::new()),
             pending_auth_conversations: Mutex::new(HashMap::new()),
             session_tool_overrides: Mutex::new(HashMap::new()),
+            mcp_clients: Mutex::new(HashMap::new()),
         })
     }
 
@@ -239,5 +242,12 @@ mod tests {
         assert!(state.pending_auth.lock().await.is_empty());
         assert!(state.pending_auth_conversations.lock().await.is_empty());
         assert!(!state.resolve_auth("tool-1", AuthAction::Deny).await);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_clients_start_empty() {
+        let state = test_state();
+
+        assert!(state.mcp_clients.lock().await.is_empty());
     }
 }
