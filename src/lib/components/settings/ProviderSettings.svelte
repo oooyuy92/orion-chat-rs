@@ -2507,11 +2507,13 @@
   }
 
   /* ── General Settings Panel ── */
-  .general-panel {
+  .general-panel,
+  .agent-panel {
     grid-column: 2 / -1;
     padding: 1.2rem 1.5rem;
     overflow-y: auto;
     min-height: 0;
+    min-width: 0;
   }
 
   .assistants-panel {
