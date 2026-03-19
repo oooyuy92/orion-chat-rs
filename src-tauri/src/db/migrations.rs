@@ -151,6 +151,10 @@ pub fn run(conn: &Connection) -> AppResult<()> {
         "ALTER TABLE conversations ADD COLUMN agent_mode INTEGER NOT NULL DEFAULT 1",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE conversations ADD COLUMN working_dirs TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS agent_settings (
             key TEXT PRIMARY KEY NOT NULL,
@@ -175,10 +179,6 @@ pub fn run(conn: &Connection) -> AppResult<()> {
     )?;
     conn.execute(
         "INSERT OR IGNORE INTO agent_settings (key, value) VALUES ('skills_dir', '')",
-        [],
-    )?;
-    conn.execute(
-        "INSERT OR IGNORE INTO agent_settings (key, value) VALUES ('working_dir', '')",
         [],
     )?;
     conn.execute(
@@ -269,6 +269,7 @@ mod tests {
                 .collect()
         };
         assert!(conversation_cols.contains(&"agent_mode".to_string()));
+        assert!(conversation_cols.contains(&"working_dirs".to_string()));
 
         let agent_settings_exists: bool = conn
             .query_row(
@@ -286,7 +287,6 @@ mod tests {
         assert!(settings_value(&conn, "tool_permissions").contains("\"bash\":\"ask\""));
         assert_eq!(settings_value(&conn, "mcp_servers"), "[]");
         assert_eq!(settings_value(&conn, "skills_dir"), "");
-        assert_eq!(settings_value(&conn, "working_dir"), "");
     }
 
     #[test]
