@@ -5,8 +5,8 @@ use crate::models::Conversation;
 
 pub fn create(conn: &Connection, conv: &Conversation) -> AppResult<()> {
     conn.execute(
-        "INSERT INTO conversations (id, title, assistant_id, model_id, is_pinned, sort_order, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO conversations (id, title, assistant_id, model_id, is_pinned, sort_order, created_at, updated_at, working_dirs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         rusqlite::params![
             conv.id,
             conv.title,
@@ -16,6 +16,7 @@ pub fn create(conn: &Connection, conv: &Conversation) -> AppResult<()> {
             conv.sort_order,
             conv.created_at,
             conv.updated_at,
+            serde_json::to_string(&conv.working_dirs).unwrap_or_else(|_| "[]".to_string()),
         ],
     )?;
     Ok(())
@@ -23,10 +24,11 @@ pub fn create(conn: &Connection, conv: &Conversation) -> AppResult<()> {
 
 pub fn get(conn: &Connection, id: &str) -> AppResult<Conversation> {
     conn.query_row(
-        "SELECT id, title, assistant_id, model_id, is_pinned, sort_order, created_at, updated_at
+        "SELECT id, title, assistant_id, model_id, is_pinned, sort_order, created_at, updated_at, working_dirs
          FROM conversations WHERE id = ?1",
         [id],
         |row| {
+            let working_dirs_json: String = row.get(8)?;
             Ok(Conversation {
                 id: row.get(0)?,
                 title: row.get(1)?,
@@ -36,6 +38,7 @@ pub fn get(conn: &Connection, id: &str) -> AppResult<Conversation> {
                 sort_order: row.get(5)?,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
+                working_dirs: serde_json::from_str(&working_dirs_json).unwrap_or_default(),
             })
         },
     )
@@ -49,10 +52,11 @@ pub fn get(conn: &Connection, id: &str) -> AppResult<Conversation> {
 
 pub fn list(conn: &Connection) -> AppResult<Vec<Conversation>> {
     let mut stmt = conn.prepare(
-        "SELECT id, title, assistant_id, model_id, is_pinned, sort_order, created_at, updated_at
+        "SELECT id, title, assistant_id, model_id, is_pinned, sort_order, created_at, updated_at, working_dirs
          FROM conversations ORDER BY is_pinned DESC, updated_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
+        let working_dirs_json: String = row.get(8)?;
         Ok(Conversation {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -62,6 +66,7 @@ pub fn list(conn: &Connection) -> AppResult<Vec<Conversation>> {
             sort_order: row.get(5)?,
             created_at: row.get(6)?,
             updated_at: row.get(7)?,
+            working_dirs: serde_json::from_str(&working_dirs_json).unwrap_or_default(),
         })
     })?;
     let mut result = Vec::new();
@@ -131,6 +136,18 @@ pub fn touch(conn: &Connection, id: &str) -> AppResult<()> {
     Ok(())
 }
 
+pub fn set_working_dirs(conn: &Connection, id: &str, dirs: &[String]) -> AppResult<()> {
+    let json = serde_json::to_string(dirs).unwrap_or_else(|_| "[]".to_string());
+    let changed = conn.execute(
+        "UPDATE conversations SET working_dirs = ?1, updated_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![json, id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::NotFound(format!("Conversation {id}")));
+    }
+    Ok(())
+}
+
 pub fn delete(conn: &Connection, id: &str) -> AppResult<()> {
     let changed = conn.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
     if changed == 0 {
@@ -158,6 +175,7 @@ mod tests {
                 sort_order: 0,
                 created_at: "2025-01-01T00:00:00".into(),
                 updated_at: "2025-01-01T00:00:00".into(),
+                working_dirs: vec![],
             };
             create(conn, &conv)?;
 
@@ -199,6 +217,7 @@ mod tests {
                 sort_order: 0,
                 created_at: "2025-01-01T00:00:00".into(),
                 updated_at: "2025-01-01T00:00:00".into(),
+                working_dirs: vec![],
             };
             create(conn, &conv)?;
 
@@ -238,6 +257,7 @@ mod tests {
                 sort_order: 0,
                 created_at: "2025-01-01T00:00:00".into(),
                 updated_at: "2025-01-01T00:00:00".into(),
+                working_dirs: vec![],
             };
             create(conn, &conv)?;
 
@@ -249,6 +269,45 @@ mod tests {
             let fetched = get(conn, "conv-1")?;
             assert_eq!(fetched.model_id, None);
 
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_set_working_dirs() {
+        let db = Database::new(":memory:").unwrap();
+
+        db.with_conn(|conn| {
+            let conv = Conversation {
+                id: "conv-1".into(),
+                title: "Hello".into(),
+                assistant_id: None,
+                model_id: None,
+                is_pinned: false,
+                sort_order: 0,
+                created_at: "2025-01-01T00:00:00".into(),
+                updated_at: "2025-01-01T00:00:00".into(),
+                working_dirs: vec![],
+            };
+            create(conn, &conv)?;
+            let fetched = get(conn, "conv-1")?;
+            assert!(fetched.working_dirs.is_empty());
+
+            set_working_dirs(
+                conn,
+                "conv-1",
+                &["/tmp/project-a".into(), "/tmp/project-b".into()],
+            )?;
+            let fetched = get(conn, "conv-1")?;
+            assert_eq!(fetched.working_dirs, vec!["/tmp/project-a", "/tmp/project-b"]);
+
+            let all = list(conn)?;
+            assert_eq!(all[0].working_dirs, vec!["/tmp/project-a", "/tmp/project-b"]);
+
+            set_working_dirs(conn, "conv-1", &[])?;
+            let fetched = get(conn, "conv-1")?;
+            assert!(fetched.working_dirs.is_empty());
             Ok(())
         })
         .unwrap();

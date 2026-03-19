@@ -132,6 +132,7 @@ pub async fn create_conversation(
         sort_order: 0,
         created_at: now.clone(),
         updated_at: now,
+        working_dirs: vec![],
     };
     state.db.with_conn(|conn| db::conversations::create(conn, &conv))?;
     Ok(conv)
@@ -526,6 +527,7 @@ pub async fn fork_conversation(
         sort_order: 0,
         created_at: now.clone(),
         updated_at: now.clone(),
+        working_dirs: source.working_dirs.clone(),
     };
     state
         .db
@@ -592,6 +594,7 @@ mod tests {
             sort_order: 0,
             created_at: "2025-01-01T00:00:00".into(),
             updated_at: "2025-01-01T00:00:00".into(),
+            working_dirs: vec![],
         }
     }
 

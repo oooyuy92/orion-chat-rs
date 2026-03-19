@@ -128,6 +128,7 @@ mod tests {
             sort_order: 0,
             created_at: "2025-01-01T00:00:00".into(),
             updated_at: "2025-01-01T00:00:00".into(),
+            working_dirs: vec![],
         }
     }
 

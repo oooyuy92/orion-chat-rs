@@ -169,6 +169,7 @@ mod tests {
                     sort_order: 0,
                     created_at: "2026-03-18T00:00:00Z".into(),
                     updated_at: "2026-03-18T00:00:00Z".into(),
+                    working_dirs: vec![],
                 },
             )?;
             Ok(())

@@ -11,4 +11,5 @@ pub struct Conversation {
     pub sort_order: i32,
     pub created_at: String,
     pub updated_at: String,
+    pub working_dirs: Vec<String>,
 }
