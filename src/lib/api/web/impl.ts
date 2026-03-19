@@ -92,6 +92,12 @@ export const webApi = {
   forkConversation(sourceConversationId: string, upToMessageId: string): Promise<Conversation> {
     return post(`/conversations/${sourceConversationId}/fork`, { upToMessageId });
   },
+  getConversationWorkingDirs(conversationId: string): Promise<string[]> {
+    return get(`/conversations/${conversationId}/working-dirs`);
+  },
+  setConversationWorkingDirs(conversationId: string, dirs: string[]): Promise<void> {
+    return patch(`/conversations/${conversationId}/working-dirs`, { dirs });
+  },
 
   // Messages
   getMessages(conversationId: string, options: GetMessagesOptions = {}): Promise<PagedMessages> {

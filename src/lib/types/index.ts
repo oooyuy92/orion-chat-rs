@@ -91,6 +91,7 @@ export interface Conversation {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
+  workingDirs: string[];
 }
 
 export type ProviderType = 'openaiCompat' | 'anthropic' | 'gemini' | 'ollama';

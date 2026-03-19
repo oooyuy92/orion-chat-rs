@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Component } from 'svelte';
   import type { ModelGroup, ProviderType } from '$lib/types';
   import { agentMode } from '$lib/stores/agent';
   import AgentToggle from './AgentToggle.svelte';
@@ -8,10 +9,15 @@
   import { i18n } from '$lib/stores/i18n.svelte';
 
   const PASTE_THRESHOLD = 500;
+  const AgentToggleWithConversation = AgentToggle as Component<{
+    disabled?: boolean;
+    conversationId?: string;
+  }>;
 
   let {
     disabled = false,
     disabledReason = '',
+    conversationId = '',
     onSend,
     onGroupSend,
     onModelSelect,
@@ -22,6 +28,7 @@
   }: {
     disabled?: boolean;
     disabledReason?: string;
+    conversationId?: string;
     onSend: (content: string) => void;
     onGroupSend?: (content: string, modelIds: string[]) => void;
     onModelSelect?: (modelId: string) => void;
@@ -171,7 +178,7 @@
       onSelectCombo={(modelIds) => (activeComboModelIds = modelIds)}
       onClearCombo={() => (activeComboModelIds = null)}
     />
-    <AgentToggle {disabled} />
+    <AgentToggleWithConversation {disabled} {conversationId} />
   </div>
 
   <div class="input-group">

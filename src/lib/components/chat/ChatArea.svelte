@@ -176,6 +176,7 @@
     <InputArea
       {disabled}
       {disabledReason}
+      {conversationId}
       {suggestions}
       {modelGroups}
       bind:selectedModelId

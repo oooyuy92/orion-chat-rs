@@ -56,6 +56,12 @@ const tauriApi = {
   forkConversation(sourceConversationId: string, upToMessageId: string): Promise<Conversation> {
     return invoke('fork_conversation', { sourceConversationId, upToMessageId });
   },
+  getConversationWorkingDirs(conversationId: string): Promise<string[]> {
+    return invoke('get_conversation_working_dirs', { conversationId });
+  },
+  setConversationWorkingDirs(conversationId: string, dirs: string[]): Promise<void> {
+    return invoke('set_conversation_working_dirs', { conversationId, dirs });
+  },
 
   // Messages
   getMessages(conversationId: string, options: GetMessagesOptions = {}): Promise<PagedMessages> {
