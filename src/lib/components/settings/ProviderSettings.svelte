@@ -15,6 +15,7 @@
   import { getVersion } from '@tauri-apps/api/app';
   import { i18n, type Language } from '$lib/stores/i18n.svelte';
   import { createDefaultAutoUpdaterController } from '$lib/utils/autoUpdater.js';
+  import { THEME_OPTIONS, DEFAULT_THEME, applyTheme } from '$lib/utils/theme.js';
 
   type NavItemId =
     | 'modelService'
@@ -222,7 +223,7 @@
   }
 
   // ── 显示设置 ──
-  type ThemeColor = { name: string; nameEn: string; primary: string; primaryForeground: string };
+  let selectedTheme = $state(DEFAULT_THEME);
 
   // Auto-rename
   let autoRename = $state(false);
@@ -240,25 +241,11 @@
       .filter((g) => g.models.length > 0)
   );
 
-  const themeColors: ThemeColor[] = [
-    { name: '石墨黑', nameEn: 'Graphite',   primary: 'oklch(0.205 0 0)',       primaryForeground: 'oklch(0.985 0 0)' },
-    { name: '雾霾蓝', nameEn: 'Haze Blue',  primary: 'oklch(0.55 0.08 240)',   primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '灰豆绿', nameEn: 'Sage',       primary: 'oklch(0.58 0.07 155)',   primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '烟粉色', nameEn: 'Dusty Rose', primary: 'oklch(0.60 0.08 10)',    primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '燕麦棕', nameEn: 'Oat Brown',  primary: 'oklch(0.55 0.06 60)',    primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '薰衣紫', nameEn: 'Lavender',   primary: 'oklch(0.55 0.09 290)',   primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '暖灰色', nameEn: 'Warm Grey',  primary: 'oklch(0.50 0.02 70)',    primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '深青色', nameEn: 'Dark Teal',  primary: 'oklch(0.50 0.09 195)',   primaryForeground: 'oklch(0.98 0 0)' },
-  ];
-
-  let selectedColorIndex = $state(0);
   let zoomLevel = $state<number>(100);
 
-  function applyThemeColor(index: number) {
-    selectedColorIndex = index;
-    const color = themeColors[index];
-    document.documentElement.style.setProperty('--primary', color.primary);
-    document.documentElement.style.setProperty('--primary-foreground', color.primaryForeground);
+  function handleThemeSelect(themeId: string) {
+    selectedTheme = themeId;
+    applyTheme(themeId);
   }
 
   function applyZoom(value: number) {
@@ -441,7 +428,7 @@
       maxBackups = (await store.get<number>('maxBackups')) ?? 3;
       compactBackup = (await store.get<boolean>('compactBackup')) ?? false;
       backupDir = (await store.get<string>('backupDir')) ?? '';
-      selectedColorIndex = (await store.get<number>('colorIndex')) ?? 0;
+      selectedTheme = (await store.get<string>('theme')) ?? DEFAULT_THEME;
       const savedZoom = (await store.get<number>('zoom')) ?? 100;
       autoUpdate = (await store.get<boolean>('autoUpdate')) ?? true;
       autoRename = (await store.get<boolean>('autoRename')) ?? false;
@@ -452,7 +439,7 @@
       zoomLevel = savedZoom;
 
       // Apply loaded display settings immediately
-      applyThemeColor(selectedColorIndex);
+      applyTheme(selectedTheme);
       applyZoom(savedZoom);
 
       // Load autostart state from backend
@@ -473,7 +460,7 @@
       await store.set('maxBackups', maxBackups);
       await store.set('compactBackup', compactBackup);
       await store.set('backupDir', backupDir);
-      await store.set('colorIndex', selectedColorIndex);
+      await store.set('theme', selectedTheme);
       await store.set('zoom', zoomLevel);
       await store.set('autoUpdate', autoUpdate);
       await store.set('autoRename', autoRename);
@@ -490,7 +477,7 @@
   // Auto-save display/general settings whenever they change
   $effect(() => {
     void proxyMode; void autoBackup; void maxBackups;
-    void compactBackup; void backupDir; void selectedColorIndex; void zoomLevel;
+    void compactBackup; void backupDir; void selectedTheme; void zoomLevel;
     void autoUpdate; void autoRename; void autoRenameModelId;
     void autoCompress; void autoCompressModelId; void autoCompressThreshold;
     if (!settingsLoaded) return;
@@ -1641,18 +1628,32 @@
 
       <div class="detail-section">
         <span class="field-label">{t.themeColor}</span>
-        <div class="color-swatches">
-          {#each themeColors as color, i}
+        <div class="theme-grid">
+          {#each THEME_OPTIONS as theme}
             <button
-              class="color-swatch"
-              class:is-selected={selectedColorIndex === i}
-              style="background: {color.primary};"
-              title={language === 'en' ? color.nameEn : color.name}
-              onclick={() => applyThemeColor(i)}
+              class="theme-card"
+              class:is-selected={selectedTheme === theme.id}
+              title={language === 'en' ? theme.label : theme.labelZh}
+              onclick={() => handleThemeSelect(theme.id)}
             >
-              {#if selectedColorIndex === i}
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-              {/if}
+              <div
+                class="theme-preview"
+                style={`--preview-background:${theme.preview.background};--preview-primary:${theme.preview.primary};--preview-accent:${theme.preview.accent};--preview-border:${theme.preview.border};`}
+              >
+                <div class="theme-preview-top"></div>
+                <div class="theme-preview-body">
+                  <div class="theme-preview-sidebar"></div>
+                  <div class="theme-preview-content">
+                    <div class="theme-preview-line theme-preview-line-title"></div>
+                    <div class="theme-preview-line"></div>
+                    <div class="theme-preview-actions">
+                      <span class="theme-preview-pill theme-preview-pill-primary"></span>
+                      <span class="theme-preview-pill"></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <span class="theme-card-label">{language === 'en' ? theme.label : theme.labelZh}</span>
             </button>
           {/each}
         </div>
@@ -2657,6 +2658,103 @@
     border-color: var(--destructive);
   }
 
+  .theme-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+  }
+
+  .theme-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    padding: 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: 0.8rem;
+    background: var(--card);
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  }
+
+  .theme-card:hover {
+    border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+    transform: translateY(-1px);
+  }
+
+  .theme-card.is-selected {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 1px color-mix(in oklch, var(--primary) 45%, transparent);
+  }
+
+  .theme-card-label {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--foreground);
+    text-align: left;
+  }
+
+  .theme-preview {
+    border: 1px solid var(--preview-border);
+    border-radius: 0.7rem;
+    overflow: hidden;
+    background: var(--preview-background);
+  }
+
+  .theme-preview-top {
+    height: 0.7rem;
+    border-bottom: 1px solid var(--preview-border);
+    background: color-mix(in oklch, var(--preview-background) 80%, white);
+  }
+
+  .theme-preview-body {
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    min-height: 68px;
+  }
+
+  .theme-preview-sidebar {
+    border-right: 1px solid var(--preview-border);
+    background: color-mix(in oklch, var(--preview-primary) 12%, var(--preview-background));
+  }
+
+  .theme-preview-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    padding: 0.55rem;
+  }
+
+  .theme-preview-line {
+    height: 0.38rem;
+    border-radius: 999px;
+    background: color-mix(in oklch, var(--preview-primary) 16%, var(--preview-background));
+  }
+
+  .theme-preview-line-title {
+    width: 68%;
+    background: color-mix(in oklch, var(--preview-primary) 28%, var(--preview-background));
+  }
+
+  .theme-preview-actions {
+    display: flex;
+    gap: 0.35rem;
+    margin-top: auto;
+  }
+
+  .theme-preview-pill {
+    width: 1.7rem;
+    height: 0.55rem;
+    border-radius: 999px;
+    border: 1px solid var(--preview-border);
+    background: color-mix(in oklch, var(--preview-accent) 50%, white);
+  }
+
+  .theme-preview-pill-primary {
+    border-color: color-mix(in oklch, var(--preview-primary) 45%, var(--preview-border));
+    background: var(--preview-primary);
+  }
+
   .combo-slot-plus {
     font-weight: 300;
   }
@@ -2770,36 +2868,6 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-  }
-
-  /* ── Color Swatches ── */
-  .color-swatches {
-    display: flex;
-    gap: 0.6rem;
-    margin-top: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .color-swatch {
-    width: 2rem;
-    height: 2rem;
-    border-radius: 50%;
-    border: 2px solid transparent;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: white;
-    transition: border-color 0.15s, transform 0.15s;
-  }
-
-  .color-swatch:hover {
-    transform: scale(1.12);
-  }
-
-  .color-swatch.is-selected {
-    border-color: var(--foreground);
-    box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--foreground);
   }
 
   /* ── Zoom ── */
