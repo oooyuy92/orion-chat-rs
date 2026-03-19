@@ -46,13 +46,13 @@ pub async fn agent_chat(
     channel: Channel<ChatEvent>,
 ) -> AppResult<Message> {
     let app_state = Arc::clone(state.inner());
-    app_state
+    let conv = app_state
         .db
-        .with_conn(|conn| db::conversations::get(conn, &conversation_id).map(|_| ()))?;
+        .with_conn(|conn| db::conversations::get(conn, &conversation_id))?;
+    let working_dirs = conv.working_dirs;
 
     let provider_config = config::build_provider_config(&app_state.db, &model_id).await?;
     let permissions = load_tool_permissions(&app_state)?;
-    let working_dir = load_working_dir(&app_state)?;
     let history = load_conversation_messages(&app_state.db, &conversation_id)?;
 
     let user_message = insert_user_message(&app_state.db, &conversation_id, &message)?;
@@ -98,10 +98,16 @@ pub async fn agent_chat(
             &conversation_id,
             permissions,
             emit_event.clone(),
-            &working_dir,
+            &working_dirs,
         )
         .await?,
     };
+
+    if working_dirs.is_empty() {
+        context.system_prompt.push_str(
+            "\n\n注意：当前未设置工作目录，文件操作功能不可用。请用户先设置工作目录。"
+        );
+    }
 
     let cancel_rx = app_state.create_cancel_token(&conversation_id).await;
     let cancel_token = watch_to_cancellation_token(cancel_rx);
@@ -227,6 +233,32 @@ pub async fn set_skills_dir(state: State<'_, Arc<AppState>>, dir: String) -> App
 }
 
 #[tauri::command]
+pub async fn get_conversation_working_dirs(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+) -> AppResult<Vec<String>> {
+    state.db.with_conn(|conn| {
+        let conv = db::conversations::get(conn, &conversation_id)?;
+        Ok(conv.working_dirs)
+    })
+}
+
+#[tauri::command]
+pub async fn set_conversation_working_dirs(
+    state: State<'_, Arc<AppState>>,
+    conversation_id: String,
+    dirs: Vec<String>,
+) -> AppResult<()> {
+    let dirs: Vec<String> = dirs
+        .into_iter()
+        .map(|d| d.trim_end_matches('/').to_string())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    state.db.with_conn(|conn| db::conversations::set_working_dirs(conn, &conversation_id, &dirs))
+}
+
+#[tauri::command]
 pub async fn scan_skills(state: State<'_, Arc<AppState>>) -> AppResult<Vec<SkillInfo>> {
     let dir = state.db.with_conn(|conn| {
         Ok(conn
@@ -326,32 +358,12 @@ fn save_mcp_server_configs(state: &AppState, configs: &[McpServerConfig]) -> App
     })
 }
 
-fn load_working_dir(state: &AppState) -> AppResult<String> {
-    let working_dir = state.db.with_conn(|conn| {
-        conn.query_row(
-            "SELECT value FROM agent_settings WHERE key = 'working_dir'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .map_err(Into::into)
-    })?;
-
-    if working_dir.trim().is_empty() {
-        Ok(std::env::current_dir()
-            .map_err(AppError::Io)?
-            .display()
-            .to_string())
-    } else {
-        Ok(working_dir)
-    }
-}
-
 async fn build_tools(
     state: Arc<AppState>,
     conversation_id: &str,
     permissions: ToolPermissions,
     emit_event: ChatEventEmitter,
-    working_dir: &str,
+    working_dirs: &[String],
 ) -> AppResult<Vec<Box<dyn yoagent::AgentTool>>> {
     let make_tool = |tool: Box<dyn yoagent::AgentTool>| {
         Box::new(PermissionedTool::new(
@@ -363,22 +375,29 @@ async fn build_tools(
         )) as Box<dyn yoagent::AgentTool>
     };
 
+    let bash_cwd = if let Some(first) = working_dirs.first() {
+        first.clone()
+    } else {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/"))
+            .display()
+            .to_string()
+    };
+
     let mut tools = vec![
-        make_tool(Box::new(BashTool::new().with_cwd(working_dir.to_string()))),
-        make_tool(Box::new(
-            ReadFileTool::new().with_allowed_paths(vec![working_dir.to_string()]),
-        )),
-        make_tool(Box::new(
-            WriteFileTool::new().with_allowed_paths(vec![working_dir.to_string()]),
-        )),
-        make_tool(Box::new(
-            EditFileTool::new().with_allowed_paths(vec![working_dir.to_string()]),
-        )),
-        make_tool(Box::new(
-            ListFilesTool::new().with_root(working_dir.to_string()),
-        )),
-        make_tool(Box::new(SearchTool::new().with_root(working_dir.to_string()))),
+        make_tool(Box::new(BashTool::new().with_cwd(bash_cwd))),
     ];
+
+    if !working_dirs.is_empty() {
+        let paths: Vec<String> = working_dirs.to_vec();
+        tools.extend(vec![
+            make_tool(Box::new(ReadFileTool::new().with_allowed_paths(paths.clone()))),
+            make_tool(Box::new(WriteFileTool::new().with_allowed_paths(paths.clone()))),
+            make_tool(Box::new(EditFileTool::new().with_allowed_paths(paths.clone()))),
+            make_tool(Box::new(ListFilesTool::new().with_root(working_dirs[0].clone()))),
+            make_tool(Box::new(SearchTool::new().with_root(working_dirs[0].clone()))),
+        ]);
+    }
 
     let mcp_tools = mcp::get_mcp_tools(&state).await?;
     tools.extend(mcp_tools);
@@ -674,7 +693,7 @@ mod tests {
             "conv-1",
             ToolPermissions::with_defaults(),
             Arc::new(|_| {}),
-            &working_dir.display().to_string(),
+            &[working_dir.display().to_string()],
         )
         .await
         .unwrap();
@@ -709,7 +728,7 @@ mod tests {
             "conv-1",
             ToolPermissions::with_defaults(),
             Arc::new(|_| {}),
-            &working_dir.display().to_string(),
+            &[working_dir.display().to_string()],
         )
         .await
         .unwrap();
@@ -730,5 +749,27 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(working_dir);
         let _ = std::fs::remove_dir_all(outside_dir);
+    }
+
+    #[tokio::test]
+    async fn test_build_tools_empty_working_dirs_excludes_file_tools() {
+        let state = Arc::new(AppState::new(":memory:", "/tmp").unwrap());
+        let tools = build_tools(
+            state,
+            "conv-1",
+            ToolPermissions::with_defaults(),
+            Arc::new(|_| {}),
+            &[],
+        )
+        .await
+        .unwrap();
+        let tool_names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+
+        assert!(tool_names.contains(&"bash"));
+        assert!(!tool_names.contains(&"read_file"));
+        assert!(!tool_names.contains(&"write_file"));
+        assert!(!tool_names.contains(&"edit_file"));
+        assert!(!tool_names.contains(&"list_files"));
+        assert!(!tool_names.contains(&"search"));
     }
 }

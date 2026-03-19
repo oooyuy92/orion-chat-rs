@@ -89,6 +89,8 @@ pub fn run() {
             agent::commands::add_mcp_server,
             agent::commands::remove_mcp_server,
             agent::commands::list_mcp_servers,
+            agent::commands::get_conversation_working_dirs,
+            agent::commands::set_conversation_working_dirs,
             commands::chat::send_message,
             commands::chat::send_message_group,
             commands::chat::resend_message,
