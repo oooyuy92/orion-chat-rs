@@ -1628,32 +1628,18 @@
 
       <div class="detail-section">
         <span class="field-label">{t.themeColor}</span>
-        <div class="theme-grid">
+        <div class="theme-swatch-row">
           {#each THEME_OPTIONS as theme}
             <button
-              class="theme-card"
+              type="button"
+              class="theme-swatch"
               class:is-selected={selectedTheme === theme.id}
+              aria-label={language === 'en' ? theme.label : theme.labelZh}
               title={language === 'en' ? theme.label : theme.labelZh}
+              style={`--swatch-color:${theme.preview.primary};`}
               onclick={() => handleThemeSelect(theme.id)}
             >
-              <div
-                class="theme-preview"
-                style={`--preview-background:${theme.preview.background};--preview-primary:${theme.preview.primary};--preview-accent:${theme.preview.accent};--preview-border:${theme.preview.border};`}
-              >
-                <div class="theme-preview-top"></div>
-                <div class="theme-preview-body">
-                  <div class="theme-preview-sidebar"></div>
-                  <div class="theme-preview-content">
-                    <div class="theme-preview-line theme-preview-line-title"></div>
-                    <div class="theme-preview-line"></div>
-                    <div class="theme-preview-actions">
-                      <span class="theme-preview-pill theme-preview-pill-primary"></span>
-                      <span class="theme-preview-pill"></span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <span class="theme-card-label">{language === 'en' ? theme.label : theme.labelZh}</span>
+              <span class="theme-swatch-fill" aria-hidden="true" style={`background-color:${theme.preview.primary};`}></span>
             </button>
           {/each}
         </div>
@@ -2660,101 +2646,49 @@
     border-color: var(--destructive);
   }
 
-  .theme-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  .theme-swatch-row {
+    display: flex;
+    align-items: center;
     gap: 0.75rem;
     margin-top: 0.75rem;
+    overflow-x: auto;
+    padding: 0.3rem 0.2rem 0.4rem;
+    scrollbar-width: thin;
   }
 
-  .theme-card {
-    display: flex;
-    flex-direction: column;
-    gap: 0.55rem;
-    padding: 0.7rem;
-    border: 1px solid var(--border);
-    border-radius: 0.8rem;
-    background: var(--card);
+  .theme-swatch {
+    appearance: none;
+    -webkit-appearance: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    flex: 0 0 auto;
+    padding: 0;
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background: transparent;
     cursor: pointer;
-    transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+    transition: transform 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
   }
 
-  .theme-card:hover {
-    border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+  .theme-swatch-fill {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 999px;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  }
+
+  .theme-swatch:hover {
     transform: translateY(-1px);
+    opacity: 0.92;
   }
 
-  .theme-card.is-selected {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 1px color-mix(in oklch, var(--primary) 45%, transparent);
-  }
-
-  .theme-card-label {
-    font-size: 0.82rem;
-    font-weight: 600;
-    color: var(--foreground);
-    text-align: left;
-  }
-
-  .theme-preview {
-    border: 1px solid var(--preview-border);
-    border-radius: 0.7rem;
-    overflow: hidden;
-    background: var(--preview-background);
-  }
-
-  .theme-preview-top {
-    height: 0.7rem;
-    border-bottom: 1px solid var(--preview-border);
-    background: color-mix(in oklch, var(--preview-background) 80%, white);
-  }
-
-  .theme-preview-body {
-    display: grid;
-    grid-template-columns: 28px 1fr;
-    min-height: 68px;
-  }
-
-  .theme-preview-sidebar {
-    border-right: 1px solid var(--preview-border);
-    background: color-mix(in oklch, var(--preview-primary) 12%, var(--preview-background));
-  }
-
-  .theme-preview-content {
-    display: flex;
-    flex-direction: column;
-    gap: 0.4rem;
-    padding: 0.55rem;
-  }
-
-  .theme-preview-line {
-    height: 0.38rem;
-    border-radius: 999px;
-    background: color-mix(in oklch, var(--preview-primary) 16%, var(--preview-background));
-  }
-
-  .theme-preview-line-title {
-    width: 68%;
-    background: color-mix(in oklch, var(--preview-primary) 28%, var(--preview-background));
-  }
-
-  .theme-preview-actions {
-    display: flex;
-    gap: 0.35rem;
-    margin-top: auto;
-  }
-
-  .theme-preview-pill {
-    width: 1.7rem;
-    height: 0.55rem;
-    border-radius: 999px;
-    border: 1px solid var(--preview-border);
-    background: color-mix(in oklch, var(--preview-accent) 50%, white);
-  }
-
-  .theme-preview-pill-primary {
-    border-color: color-mix(in oklch, var(--preview-primary) 45%, var(--preview-border));
-    background: var(--preview-primary);
+  .theme-swatch.is-selected {
+    border-color: var(--swatch-color);
+    transform: scale(1.08);
   }
 
   .combo-slot-plus {

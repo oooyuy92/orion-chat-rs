@@ -1,8 +1,10 @@
-import { writable } from 'svelte/store';
-import type { ToolCallState } from '$lib/types';
+import { get, writable } from 'svelte/store';
+import type { ChatEvent, ToolCallState } from '$lib/types';
 
 export const agentMode = writable<boolean>(true);
 export const activeToolCalls = writable<ToolCallState[]>([]);
+export const devMode = writable<boolean>(false);
+export const agentEventLog = writable<{ time: number; event: ChatEvent }[]>([]);
 export const pendingAuth = writable<{
   toolCallId: string;
   toolName: string;
@@ -36,4 +38,14 @@ export function completeToolCall(toolCallId: string, result: string, isError: bo
 
 export function clearToolCalls() {
   activeToolCalls.set([]);
+}
+
+export function pushAgentEvent(event: ChatEvent) {
+  if (get(devMode)) {
+    agentEventLog.update((log) => [...log, { time: Date.now(), event }]);
+  }
+}
+
+export function clearAgentEventLog() {
+  agentEventLog.set([]);
 }

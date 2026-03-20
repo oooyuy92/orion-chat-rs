@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::EventSource;
 use serde::Deserialize;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -35,9 +36,14 @@ impl StreamProvider for OpenAiCompatProvider {
         let url = format!("{}/chat/completions", base_url);
 
         let body = build_request_body(&config, model_config, &compat);
-        debug!("OpenAI compat request: model={} url={}", config.model, url);
+        let msg_count = config.messages.len();
+        let body_size = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
+        debug!("OpenAI compat request: model={} url={} messages={} body_bytes={}", config.model, url, msg_count, body_size);
 
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         let mut request = client
             .post(&url)
             .header("content-type", "application/json")
@@ -57,8 +63,16 @@ impl StreamProvider for OpenAiCompatProvider {
         let mut usage = Usage::default();
         let mut stop_reason = StopReason::Stop;
         let mut tool_call_buffers: Vec<ToolCallBuffer> = Vec::new();
+        let mut chunk_count: usize = 0;
 
         let _ = tx.send(StreamEvent::Start);
+
+        // Per-chunk read timeout: if no SSE event arrives within this
+        // duration, treat it as a timeout error. This prevents the stream
+        // from hanging forever if the API stops responding.
+        let read_timeout = Duration::from_secs(300);
+        let sleep = tokio::time::sleep(read_timeout);
+        tokio::pin!(sleep);
 
         loop {
             tokio::select! {
@@ -66,10 +80,36 @@ impl StreamProvider for OpenAiCompatProvider {
                     es.close();
                     return Err(ProviderError::Cancelled);
                 }
+                _ = &mut sleep => {
+                    warn!("OpenAI SSE: read timeout after {}s with {} chunks received", read_timeout.as_secs(), chunk_count);
+                    es.close();
+                    let err_msg = Message::Assistant {
+                        content: if content.is_empty() {
+                            vec![Content::Text { text: String::new() }]
+                        } else {
+                            content
+                        },
+                        stop_reason: StopReason::Error,
+                        model: config.model.clone(),
+                        provider: model_config.provider.clone(),
+                        usage: usage.clone(),
+                        timestamp: now_ms(),
+                        error_message: Some(format!(
+                            "SSE read timeout: no response from API for {}s",
+                            read_timeout.as_secs()
+                        )),
+                    };
+                    let _ = tx.send(StreamEvent::Error { message: err_msg.clone() });
+                    return Ok(err_msg);
+                }
                 event = es.next() => {
+                    // Reset the read timeout on every event
+                    sleep.as_mut().reset(tokio::time::Instant::now() + read_timeout);
                     match event {
                         None => break,
-                        Some(Ok(reqwest_eventsource::Event::Open)) => {}
+                        Some(Ok(reqwest_eventsource::Event::Open)) => {
+                            debug!("OpenAI SSE: connection opened");
+                        }
                         Some(Ok(reqwest_eventsource::Event::Message(msg))) => {
                             if msg.data == "[DONE]" {
                                 break;
@@ -82,6 +122,10 @@ impl StreamProvider for OpenAiCompatProvider {
                                     continue;
                                 }
                             };
+                            chunk_count += 1;
+                            if chunk_count == 1 {
+                                debug!("OpenAI SSE: first chunk received");
+                            }
 
                             // Process usage
                             if let Some(u) = &chunk.usage {
@@ -202,6 +246,7 @@ impl StreamProvider for OpenAiCompatProvider {
         }
 
         // Finalize tool calls
+        debug!("OpenAI SSE: stream ended, chunks={} tool_buffers={} stop={:?}", chunk_count, tool_call_buffers.len(), stop_reason);
         for buf in &tool_call_buffers {
             let args = serde_json::from_str(&buf.arguments)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
@@ -272,13 +317,23 @@ fn build_request_body(
                 }));
             }
             Message::Assistant { content, .. } => {
-                let mut parts: Vec<serde_json::Value> = Vec::new();
+                let mut assistant_content: Vec<Content> = Vec::new();
+                let mut reasoning = String::new();
                 let mut tool_calls: Vec<serde_json::Value> = Vec::new();
 
                 for c in content {
                     match c {
                         Content::Text { text } => {
-                            parts.push(serde_json::json!({"type": "text", "text": text}));
+                            assistant_content.push(Content::Text { text: text.clone() });
+                        }
+                        Content::Image { data, mime_type } => {
+                            assistant_content.push(Content::Image {
+                                data: data.clone(),
+                                mime_type: mime_type.clone(),
+                            });
+                        }
+                        Content::Thinking { thinking, .. } => {
+                            reasoning.push_str(thinking);
                         }
                         Content::ToolCall {
                             id,
@@ -291,13 +346,22 @@ fn build_request_body(
                                 "function": {"name": name, "arguments": arguments.to_string()},
                             }));
                         }
-                        _ => {}
                     }
                 }
 
-                let mut msg_obj = serde_json::json!({"role": "assistant"});
-                if !parts.is_empty() {
-                    msg_obj["content"] = serde_json::json!(parts);
+                let mut msg_obj = serde_json::json!({
+                    "role": "assistant",
+                    "content": assistant_content_to_openai(&assistant_content),
+                });
+                if !reasoning.is_empty() {
+                    match compat.thinking_format {
+                        ThinkingFormat::Xai => {
+                            msg_obj["reasoning"] = serde_json::json!(reasoning);
+                        }
+                        _ => {
+                            msg_obj["reasoning_content"] = serde_json::json!(reasoning);
+                        }
+                    }
                 }
                 if !tool_calls.is_empty() {
                     msg_obj["tool_calls"] = serde_json::json!(tool_calls);
@@ -388,6 +452,13 @@ fn build_request_body(
     }
 
     body
+}
+
+fn assistant_content_to_openai(content: &[Content]) -> serde_json::Value {
+    if content.is_empty() {
+        return serde_json::json!("");
+    }
+    content_to_openai(content)
 }
 
 fn content_to_openai(content: &[Content]) -> serde_json::Value {
@@ -643,5 +714,51 @@ mod tests {
         let tool_msg = msgs.last().unwrap();
         // Text-only: content should be a plain string
         assert_eq!(tool_msg["content"], "hello");
+    }
+
+    #[test]
+    fn test_build_request_body_preserves_reasoning_for_tool_follow_up() {
+        let model_config = ModelConfig::local("https://api.deepseek.com/v1", "deepseek-reasoner");
+        let compat = OpenAiCompat::default();
+        let config = StreamConfig {
+            model: "deepseek-reasoner".into(),
+            system_prompt: String::new(),
+            messages: vec![Message::Assistant {
+                content: vec![
+                    Content::Thinking {
+                        thinking: "Need to inspect the directory before answering.".into(),
+                        signature: None,
+                    },
+                    Content::ToolCall {
+                        id: "call-1".into(),
+                        name: "list_files".into(),
+                        arguments: serde_json::json!({"path": "."}),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+                model: "deepseek-reasoner".into(),
+                provider: "deepseek".into(),
+                usage: Usage::default(),
+                timestamp: 0,
+                error_message: None,
+            }],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        let assistant_msg = body["messages"].as_array().unwrap().last().unwrap();
+
+        assert_eq!(
+            assistant_msg["reasoning_content"],
+            "Need to inspect the directory before answering."
+        );
+        assert_eq!(assistant_msg["content"], "");
+        assert_eq!(assistant_msg["tool_calls"][0]["function"]["name"], "list_files");
     }
 }

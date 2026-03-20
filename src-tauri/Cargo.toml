@@ -37,6 +37,7 @@ thiserror = "2"
 futures-util = "0.3"
 dirs = "6"
 yoagent = { path = "crates/yoagent" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tauri-plugin-shell = "2.3.5"
 tauri-plugin-dialog = "2.6.0"
 tauri-plugin-fs = "2.4.5"

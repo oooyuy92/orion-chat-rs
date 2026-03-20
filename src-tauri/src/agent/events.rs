@@ -41,24 +41,24 @@ pub async fn handle_agent_event(
             tool_name,
             args,
         } => {
-            if let Ok(message_id) = insert_tool_call_start(
+            let message_id = insert_tool_call_start(
                 db,
                 conversation_id,
                 &tool_call_id,
                 &tool_name,
                 &args.to_string(),
-            ) {
-                tool_message_ids
-                    .lock()
-                    .await
-                    .insert(tool_call_id.clone(), message_id.clone());
-                emit_event(ChatEvent::ToolCallStart {
-                    message_id,
-                    tool_call_id,
-                    tool_name,
-                    args: args.to_string(),
-                });
-            }
+            )
+            .unwrap_or_else(|_| tool_call_id.clone());
+            tool_message_ids
+                .lock()
+                .await
+                .insert(tool_call_id.clone(), message_id.clone());
+            emit_event(ChatEvent::ToolCallStart {
+                message_id,
+                tool_call_id,
+                tool_name,
+                args: args.to_string(),
+            });
         }
         AgentEvent::ToolExecutionUpdate {
             tool_call_id,
@@ -81,21 +81,22 @@ pub async fn handle_agent_event(
             is_error,
             ..
         } => {
-            if let Ok(message_id) = insert_tool_call_result(
+            let rendered = render_tool_result(&result);
+            let message_id = insert_tool_call_result(
                 db,
                 conversation_id,
                 &tool_call_id,
                 &tool_name,
-                &render_tool_result(&result),
+                &rendered,
                 is_error,
-            ) {
-                emit_event(ChatEvent::ToolCallEnd {
-                    message_id,
-                    tool_call_id: tool_call_id.clone(),
-                    result: render_tool_result(&result),
-                    is_error,
-                });
-            }
+            )
+            .unwrap_or_else(|_| tool_call_id.clone());
+            emit_event(ChatEvent::ToolCallEnd {
+                message_id,
+                tool_call_id: tool_call_id.clone(),
+                result: rendered,
+                is_error,
+            });
             tool_message_ids.lock().await.remove(&tool_call_id);
         }
         AgentEvent::MessageEnd {
@@ -266,5 +267,56 @@ mod tests {
             })
             .unwrap();
         assert_eq!(tool_message_count, 2);
+    }
+
+    #[tokio::test]
+    async fn test_tool_events_emitted_even_when_db_write_fails() {
+        // Use a DB with no conversations table setup for the target conv,
+        // so insert_tool_call_start/result will fail on FK constraint.
+        let db = setup_db();
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let emitter: ChatEventEmitter = Arc::new({
+            let events = events.clone();
+            move |event| events.lock().unwrap().push(event)
+        });
+        let tool_ids = Arc::new(Mutex::new(HashMap::new()));
+
+        // Use a conversation_id that doesn't exist — FK will reject the insert
+        handle_agent_event(
+            AgentEvent::ToolExecutionStart {
+                tool_call_id: "call-orphan".into(),
+                tool_name: "bash".into(),
+                args: serde_json::json!({ "command": "echo boom" }),
+            },
+            &emitter,
+            &db,
+            "nonexistent-conv",
+            "assistant-1",
+            &tool_ids,
+        )
+        .await;
+
+        handle_agent_event(
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id: "call-orphan".into(),
+                tool_name: "bash".into(),
+                result: ToolResult {
+                    content: vec![Content::Text { text: "boom".into() }],
+                    details: serde_json::json!({}),
+                },
+                is_error: false,
+            },
+            &emitter,
+            &db,
+            "nonexistent-conv",
+            "assistant-1",
+            &tool_ids,
+        )
+        .await;
+
+        let events = events.lock().unwrap();
+        // Both events should still be emitted even though DB writes failed
+        assert!(events.iter().any(|e| matches!(e, ChatEvent::ToolCallStart { tool_call_id, .. } if tool_call_id == "call-orphan")));
+        assert!(events.iter().any(|e| matches!(e, ChatEvent::ToolCallEnd { tool_call_id, .. } if tool_call_id == "call-orphan")));
     }
 }

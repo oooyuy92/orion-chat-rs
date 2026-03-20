@@ -10,6 +10,16 @@ pub mod state;
 use std::sync::Arc;
 
 pub fn run() {
+    // Initialize tracing subscriber for diagnostic logging.
+    // Use RUST_LOG env var to control verbosity, e.g.:
+    //   RUST_LOG=yoagent=debug,orion_chat_rs=debug
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .init();
+
     // Determine app data directory
     let data_dir = dirs::data_dir()
         .expect("Failed to get data directory")

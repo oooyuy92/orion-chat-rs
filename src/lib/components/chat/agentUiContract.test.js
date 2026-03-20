@@ -7,6 +7,8 @@ const agentToggle = readFileSync(new URL('./AgentToggle.svelte', import.meta.url
 const toolTimeline = readFileSync(new URL('./ToolTimeline.svelte', import.meta.url), 'utf8');
 const toolTimelineItem = readFileSync(new URL('./ToolTimelineItem.svelte', import.meta.url), 'utf8');
 const toolAuthDialog = readFileSync(new URL('./ToolAuthDialog.svelte', import.meta.url), 'utf8');
+const dialogContent = readFileSync(new URL('../ui/dialog/dialog-content.svelte', import.meta.url), 'utf8');
+const dialogOverlay = readFileSync(new URL('../ui/dialog/dialog-overlay.svelte', import.meta.url), 'utf8');
 const inputArea = readFileSync(new URL('./InputArea.svelte', import.meta.url), 'utf8');
 const messageList = readFileSync(new URL('./MessageList.svelte', import.meta.url), 'utf8');
 const page = readFileSync(new URL('../../../routes/+page.svelte', import.meta.url), 'utf8');
@@ -35,10 +37,23 @@ test('tool auth dialog wires pending auth to authorize actions', () => {
   assert.match(toolAuthDialog, /respond\('deny'\)/);
 });
 
+test('shared dialog layers remain clickable when body pointer events are locked', () => {
+  assert.match(dialogOverlay, /pointer-events-auto/);
+  assert.match(dialogContent, /pointer-events-auto/);
+});
+
 test('message flow integrates tool timeline and auth dialog', () => {
   assert.match(messageList, /ToolTimeline/);
   assert.match(page, /agentChat/);
   assert.match(page, /agentStop/);
   assert.match(page, /pendingAuth\.set/);
   assert.match(page, /<ToolAuthDialog \/>/);
+});
+
+test('ToolTimeline imports devMode and agentEventLog from agent store', () => {
+  assert.match(toolTimeline, /import\s.*devMode.*from\s+['"]\$lib\/stores\/agent['"]/);
+  assert.match(toolTimeline, /import\s.*agentEventLog.*from\s+['"]\$lib\/stores\/agent['"]/);
+  assert.match(toolTimeline, /\$devMode/);
+  assert.match(toolTimeline, /\$agentEventLog/);
+  assert.match(toolTimeline, /Event Log/);
 });

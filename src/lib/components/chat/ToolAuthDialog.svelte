@@ -16,8 +16,13 @@
       return;
     }
 
-    await agentAuthorizeTool($pendingAuth.toolCallId, action);
-    pendingAuth.set(null);
+    try {
+      await agentAuthorizeTool($pendingAuth.toolCallId, action);
+    } catch {
+      // Agent may have already completed or timed out — clear dialog regardless
+    } finally {
+      pendingAuth.set(null);
+    }
   }
 
   async function handleOpenChange(nextOpen: boolean) {

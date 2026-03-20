@@ -10,7 +10,9 @@
 use crate::context::{
     self, CompactionStrategy, ContextConfig, DefaultCompaction, ExecutionLimits, ExecutionTracker,
 };
-use crate::provider::{ModelConfig, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
+use crate::provider::{
+    ModelConfig, ProviderError, StreamConfig, StreamEvent, StreamProvider, ToolDefinition,
+};
 use crate::types::*;
 use std::sync::Arc;
 
@@ -27,7 +29,7 @@ pub type AfterTurnFn = Arc<dyn Fn(&[AgentMessage], &Usage) + Send + Sync>;
 /// Called when the LLM returns a `StopReason::Error`.
 pub type OnErrorFn = Arc<dyn Fn(&str) + Send + Sync>;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Configuration for the agent loop
 pub struct AgentLoopConfig {
@@ -248,6 +250,8 @@ async fn run_loop(
 ) {
     let mut first_turn = true;
     let mut turn_number: usize = 0;
+    let mut length_continuations: usize = 0;
+    const MAX_LENGTH_CONTINUATIONS: usize = 2;
     let mut tracker = config
         .execution_limits
         .as_ref()
@@ -327,6 +331,7 @@ async fn run_loop(
                 }
             }
             turn_number += 1;
+            info!("agent_loop: turn {} starting, messages={}", turn_number, context.messages.len());
 
             // Compact context if configured (tiered: tool outputs → summarize → drop)
             if let Some(ref ctx_config) = config.context_config {
@@ -339,7 +344,12 @@ async fn run_loop(
             }
 
             // Stream assistant response
+            info!("agent_loop: calling stream_assistant_response for turn {}", turn_number);
             let message = stream_assistant_response(context, config, tx, cancel).await;
+            info!("agent_loop: stream_assistant_response returned, stop_reason={:?}", match &message {
+                Message::Assistant { stop_reason, .. } => format!("{:?}", stop_reason),
+                _ => "N/A".to_string(),
+            });
 
             let agent_msg: AgentMessage = message.clone().into();
             context.messages.push(agent_msg.clone());
@@ -390,9 +400,20 @@ async fn run_loop(
             };
 
             let has_tool_calls = !tool_calls.is_empty();
+
+            // Handle truncated responses: if the LLM hit the output token
+            // limit without producing tool calls, inject a continuation
+            // prompt so the model can re-issue the intended tool call.
+            let length_truncated = matches!(
+                &message,
+                Message::Assistant { stop_reason, .. } if *stop_reason == StopReason::Length
+            ) && !has_tool_calls;
+
             let mut tool_results: Vec<Message> = Vec::new();
 
             if has_tool_calls {
+                length_continuations = 0; // reset on successful tool call
+                info!("agent_loop: executing {} tool call(s)", tool_calls.len());
                 let execution = execute_tool_calls(
                     &context.tools,
                     &tool_calls,
@@ -402,6 +423,7 @@ async fn run_loop(
                     &config.tool_execution,
                 )
                 .await;
+                info!("agent_loop: tool execution complete, {} results", execution.tool_results.len());
 
                 tool_results = execution.tool_results;
                 steering_after_tools = execution.steering_messages;
@@ -453,6 +475,21 @@ async fn run_loop(
 
             // Exit inner loop if no more tool calls and no pending messages
             if !has_tool_calls && pending.is_empty() {
+                if length_truncated && length_continuations < MAX_LENGTH_CONTINUATIONS {
+                    length_continuations += 1;
+                    info!("agent_loop: length truncated, sending continuation prompt (attempt {})", length_continuations);
+                    // Response was truncated — nudge the model to continue.
+                    let continuation = AgentMessage::Llm(Message::User {
+                        content: vec![Content::Text {
+                            text: "[Your previous response was truncated due to the output token limit. Please continue, and if you intended to call a tool, re-issue the tool call.]".to_string(),
+                        }],
+                        timestamp: now_ms(),
+                    });
+                    context.messages.push(continuation.clone());
+                    new_messages.push(continuation);
+                    // loop back for another LLM turn
+                    continue;
+                }
                 break;
             }
         }
@@ -505,10 +542,14 @@ async fn stream_assistant_response(
         })
         .collect();
 
-    // Retry loop for transient provider errors
+    // Retry loop for transient provider errors.
+    // The provider stream is spawned on a separate task so that we can
+    // forward StreamEvents → AgentEvents in real-time. Without this, the
+    // UI receives zero feedback until the entire stream completes, which
+    // makes slow models (e.g. reasoning models) appear "stuck".
     let retry = &config.retry_config;
     let mut attempt = 0;
-    let (result, mut stream_rx) = loop {
+    loop {
         let stream_config = StreamConfig {
             model: config.model.clone(),
             system_prompt: context.system_prompt.clone(),
@@ -522,16 +563,122 @@ async fn stream_assistant_response(
             cache_config: config.cache_config.clone(),
         };
 
-        let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+        let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+        let provider = config.provider.clone();
         let provider_cancel = cancel.clone();
+        let model_for_placeholder = config.model.clone();
 
-        let result = config
-            .provider
-            .stream(stream_config, stream_tx, provider_cancel)
-            .await;
+        // Spawn the stream so events can be forwarded concurrently.
+        info!("stream_assistant_response: spawning provider stream, model={}", config.model);
+        let stream_handle = tokio::spawn(async move {
+            provider
+                .stream(stream_config, stream_tx, provider_cancel)
+                .await
+        });
+
+        // Forward events as they arrive (real-time UI updates).
+        let mut partial_message: Option<AgentMessage> = None;
+        let mut event_count: usize = 0;
+        while let Some(event) = stream_rx.recv().await {
+            event_count += 1;
+            if event_count <= 3 || matches!(&event, StreamEvent::Done { .. } | StreamEvent::Error { .. }) {
+                info!("stream_assistant_response: event #{} type={}", event_count, match &event {
+                    StreamEvent::Start => "Start",
+                    StreamEvent::TextDelta { .. } => "TextDelta",
+                    StreamEvent::ThinkingDelta { .. } => "ThinkingDelta",
+                    StreamEvent::ToolCallStart { .. } => "ToolCallStart",
+                    StreamEvent::ToolCallDelta { .. } => "ToolCallDelta",
+                    StreamEvent::ToolCallEnd { .. } => "ToolCallEnd",
+                    StreamEvent::Done { .. } => "Done",
+                    StreamEvent::Error { .. } => "Error",
+                });
+            }
+            match &event {
+                StreamEvent::Start => {
+                    let placeholder = AgentMessage::Llm(Message::Assistant {
+                        content: Vec::new(),
+                        stop_reason: StopReason::Stop,
+                        model: model_for_placeholder.clone(),
+                        provider: String::new(),
+                        usage: Usage::default(),
+                        timestamp: now_ms(),
+                        error_message: None,
+                    });
+                    partial_message = Some(placeholder.clone());
+                    tx.send(AgentEvent::MessageStart {
+                        message: placeholder,
+                    })
+                    .ok();
+                }
+                StreamEvent::TextDelta { delta, .. } => {
+                    if let Some(ref msg) = partial_message {
+                        tx.send(AgentEvent::MessageUpdate {
+                            message: msg.clone(),
+                            delta: StreamDelta::Text {
+                                delta: delta.clone(),
+                            },
+                        })
+                        .ok();
+                    }
+                }
+                StreamEvent::ThinkingDelta { delta, .. } => {
+                    if let Some(ref msg) = partial_message {
+                        tx.send(AgentEvent::MessageUpdate {
+                            message: msg.clone(),
+                            delta: StreamDelta::Thinking {
+                                delta: delta.clone(),
+                            },
+                        })
+                        .ok();
+                    }
+                }
+                StreamEvent::ToolCallDelta { delta, .. } => {
+                    if let Some(ref msg) = partial_message {
+                        tx.send(AgentEvent::MessageUpdate {
+                            message: msg.clone(),
+                            delta: StreamDelta::ToolCallDelta {
+                                delta: delta.clone(),
+                            },
+                        })
+                        .ok();
+                    }
+                }
+                StreamEvent::Done { message } => {
+                    let am: AgentMessage = message.clone().into();
+                    partial_message = Some(am.clone());
+                    tx.send(AgentEvent::MessageEnd { message: am }).ok();
+                }
+                StreamEvent::Error { message } => {
+                    let am: AgentMessage = message.clone().into();
+                    if partial_message.is_none() {
+                        tx.send(AgentEvent::MessageStart {
+                            message: am.clone(),
+                        })
+                        .ok();
+                    }
+                    partial_message = Some(am.clone());
+                    tx.send(AgentEvent::MessageEnd { message: am }).ok();
+                }
+                _ => {}
+            }
+        }
+
+        // stream_tx was dropped when provider.stream() returned → recv loop ended.
+        info!("stream_assistant_response: stream ended, total events={}", event_count);
+        let result = match stream_handle.await {
+            Ok(r) => r,
+            Err(e) => Err(ProviderError::Other(format!(
+                "stream task panicked: {}",
+                e
+            ))),
+        };
 
         match &result {
-            Err(e) if e.is_retryable() && attempt < retry.max_retries && !cancel.is_cancelled() => {
+            Err(e)
+                if e.is_retryable()
+                    && attempt < retry.max_retries
+                    && !cancel.is_cancelled() =>
+            {
                 attempt += 1;
                 let delay = e
                     .retry_after()
@@ -540,103 +687,26 @@ async fn stream_assistant_response(
                 tokio::time::sleep(delay).await;
                 continue;
             }
-            _ => break (result, stream_rx),
-        }
-    };
-
-    // Process any events that were sent
-    let mut partial_message: Option<AgentMessage> = None;
-    while let Ok(event) = stream_rx.try_recv() {
-        match &event {
-            StreamEvent::Start => {
-                // Create a placeholder so deltas have a message to attach to.
-                // It will be replaced by the real message on Done.
-                let placeholder = AgentMessage::Llm(Message::Assistant {
-                    content: Vec::new(),
-                    stop_reason: StopReason::Stop,
-                    model: config.model.clone(),
-                    provider: String::new(),
-                    usage: Usage::default(),
-                    timestamp: now_ms(),
-                    error_message: None,
-                });
-                partial_message = Some(placeholder.clone());
-                tx.send(AgentEvent::MessageStart {
-                    message: placeholder,
-                })
-                .ok();
-            }
-            StreamEvent::TextDelta { delta, .. } => {
-                if let Some(ref msg) = partial_message {
-                    tx.send(AgentEvent::MessageUpdate {
-                        message: msg.clone(),
-                        delta: StreamDelta::Text {
-                            delta: delta.clone(),
-                        },
-                    })
-                    .ok();
-                }
-            }
-            StreamEvent::ThinkingDelta { delta, .. } => {
-                if let Some(ref msg) = partial_message {
-                    tx.send(AgentEvent::MessageUpdate {
-                        message: msg.clone(),
-                        delta: StreamDelta::Thinking {
-                            delta: delta.clone(),
-                        },
-                    })
-                    .ok();
-                }
-            }
-            StreamEvent::ToolCallDelta { delta, .. } => {
-                if let Some(ref msg) = partial_message {
-                    tx.send(AgentEvent::MessageUpdate {
-                        message: msg.clone(),
-                        delta: StreamDelta::ToolCallDelta {
-                            delta: delta.clone(),
-                        },
-                    })
-                    .ok();
-                }
-            }
-            StreamEvent::Done { message } => {
-                let am: AgentMessage = message.clone().into();
-                partial_message = Some(am.clone());
-                // MessageStart was already emitted on StreamEvent::Start
-                tx.send(AgentEvent::MessageEnd { message: am }).ok();
-            }
-            StreamEvent::Error { message } => {
-                let am: AgentMessage = message.clone().into();
-                // Only emit MessageStart if Start wasn't received
-                if partial_message.is_none() {
-                    tx.send(AgentEvent::MessageStart {
-                        message: am.clone(),
-                    })
-                    .ok();
-                }
-                partial_message = Some(am.clone());
-                tx.send(AgentEvent::MessageEnd { message: am }).ok();
-            }
             _ => {}
         }
-    }
 
-    match result {
-        Ok(msg) => msg,
-        Err(e) => {
-            warn!("Provider error: {}", e);
-            Message::Assistant {
-                content: vec![Content::Text {
-                    text: String::new(),
-                }],
-                stop_reason: StopReason::Error,
-                model: config.model.clone(),
-                provider: "unknown".into(),
-                usage: Usage::default(),
-                timestamp: now_ms(),
-                error_message: Some(e.to_string()),
+        return match result {
+            Ok(msg) => msg,
+            Err(e) => {
+                warn!("Provider error: {}", e);
+                Message::Assistant {
+                    content: vec![Content::Text {
+                        text: String::new(),
+                    }],
+                    stop_reason: StopReason::Error,
+                    model: config.model.clone(),
+                    provider: "unknown".into(),
+                    usage: Usage::default(),
+                    timestamp: now_ms(),
+                    error_message: Some(e.to_string()),
+                }
             }
-        }
+        };
     }
 }
 

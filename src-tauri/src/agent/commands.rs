@@ -140,6 +140,9 @@ pub async fn agent_chat(
     let _ = event_task.await;
 
     app_state.remove_cancel_token(&conversation_id).await;
+    app_state
+        .clear_pending_auth_for_conversation(&conversation_id)
+        .await;
 
     let outcome = final_assistant_outcome(&new_messages).ok_or(AppError::Cancelled)?;
     let assistant_message = insert_assistant_message(

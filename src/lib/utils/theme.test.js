@@ -38,3 +38,14 @@ test('applyTheme writes the root data-theme attribute', () => {
   applyTheme('not-real', root);
   assert.equal(root.dataset.theme, DEFAULT_THEME);
 });
+
+test('theme previews keep neutral surfaces while only primary changes across themes', () => {
+  const backgrounds = new Set(THEME_OPTIONS.map((theme) => theme.preview.background));
+  const borders = new Set(THEME_OPTIONS.map((theme) => theme.preview.border));
+  const primaries = new Set(THEME_OPTIONS.map((theme) => theme.preview.primary));
+
+  assert.equal(backgrounds.size, 1);
+  assert.equal(borders.size, 1);
+  assert.notEqual(primaries.size, 1);
+  assert.ok(THEME_OPTIONS.every((theme) => !theme.preview.primary.includes('oklch(')));
+});

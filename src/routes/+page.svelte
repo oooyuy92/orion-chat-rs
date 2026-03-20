@@ -12,8 +12,10 @@
     addToolCall,
     agentMode,
     clearToolCalls,
+    clearAgentEventLog,
     completeToolCall,
     pendingAuth,
+    pushAgentEvent,
     updateToolCall,
   } from '$lib/stores/agent';
   import { titleUpdates, assistantUpdates, conversationCreated, streamingConversations } from '$lib/stores/conversations';
@@ -480,6 +482,7 @@ function handleConversationSelect(selection: ConversationSelection) {
   }
 
   function handleEventFor(convId: string, event: ChatEvent) {
+    pushAgentEvent(event);
     const msgs = getMessages(convId);
     switch (event.type) {
       case 'started':
@@ -617,6 +620,7 @@ function handleConversationSelect(selection: ConversationSelection) {
 
     if (useAgentMode) {
       clearToolCalls();
+      clearAgentEventLog();
       pendingAuth.set(null);
       markAgentStreaming(convId);
     }
@@ -663,6 +667,7 @@ function handleConversationSelect(selection: ConversationSelection) {
 
     try {
       const onEvent = (event: ChatEvent) => {
+        console.log('[agent] event:', event.type, event);
         if (event.type === 'started') {
           const msgs = getMessages(convId);
           const idx = msgs.findIndex((m) => m.id === assistantMsg.id);
@@ -678,7 +683,15 @@ function handleConversationSelect(selection: ConversationSelection) {
       };
 
       if (useAgentMode) {
-        await agentChat(convId, content, currentModelId, onEvent);
+        const result = await agentChat(convId, content, currentModelId, onEvent);
+        console.log('[agent] agentChat returned:', result);
+        console.log('[agent] BEFORE cleanup: isStreaming=', isStreaming, 'isCompressing=', isCompressing, 'streamingConvIds=', [...streamingConvIds], 'agentStreamingConvIds=', [...agentStreamingConvIds]);
+        // Agent command returned — always clear streaming state.
+        // The Finished event may not have been emitted (e.g. cancelled after a prior tool turn).
+        unmarkStreaming(convId);
+        unmarkAgentStreaming(convId);
+        if (convId === activeConversationId) streamingMessageId = '';
+        console.log('[agent] AFTER cleanup: isStreaming=', isStreaming, 'isCompressing=', isCompressing);
       } else {
         const params = await loadParamsForModel(currentModelId);
         await api.sendMessage(
@@ -692,7 +705,9 @@ function handleConversationSelect(selection: ConversationSelection) {
       }
       // Reload messages from DB to sync IDs (only if still active)
       if (convId === activeConversationId) {
+        console.log('[agent] loading latest messages...');
         await loadLatestMessages(convId);
+        console.log('[agent] loadLatestMessages done, isStreaming=', isStreaming, 'isCompressing=', isCompressing);
       }
       // Trigger auto-rename based on message count
       const msgCount = getMessages(convId).length;
