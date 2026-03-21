@@ -14,6 +14,7 @@
   import { getVersion } from '@tauri-apps/api/app';
   import { i18n, type Language } from '$lib/stores/i18n.svelte';
   import { createDefaultAutoUpdaterController } from '$lib/utils/autoUpdater.js';
+  import { THEME_OPTIONS, DEFAULT_THEME, applyTheme } from '$lib/utils/theme.js';
 
   type NavItemId =
     | 'modelService'
@@ -218,7 +219,7 @@
   }
 
   // ── 显示设置 ──
-  type ThemeColor = { name: string; nameEn: string; primary: string; primaryForeground: string };
+  let selectedTheme = $state(DEFAULT_THEME);
 
   // Auto-rename
   let autoRename = $state(false);
@@ -236,25 +237,11 @@
       .filter((g) => g.models.length > 0)
   );
 
-  const themeColors: ThemeColor[] = [
-    { name: '石墨黑', nameEn: 'Graphite',   primary: 'oklch(0.205 0 0)',       primaryForeground: 'oklch(0.985 0 0)' },
-    { name: '雾霾蓝', nameEn: 'Haze Blue',  primary: 'oklch(0.55 0.08 240)',   primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '灰豆绿', nameEn: 'Sage',       primary: 'oklch(0.58 0.07 155)',   primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '烟粉色', nameEn: 'Dusty Rose', primary: 'oklch(0.60 0.08 10)',    primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '燕麦棕', nameEn: 'Oat Brown',  primary: 'oklch(0.55 0.06 60)',    primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '薰衣紫', nameEn: 'Lavender',   primary: 'oklch(0.55 0.09 290)',   primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '暖灰色', nameEn: 'Warm Grey',  primary: 'oklch(0.50 0.02 70)',    primaryForeground: 'oklch(0.98 0 0)' },
-    { name: '深青色', nameEn: 'Dark Teal',  primary: 'oklch(0.50 0.09 195)',   primaryForeground: 'oklch(0.98 0 0)' },
-  ];
-
-  let selectedColorIndex = $state(0);
   let zoomLevel = $state<number>(100);
 
-  function applyThemeColor(index: number) {
-    selectedColorIndex = index;
-    const color = themeColors[index];
-    document.documentElement.style.setProperty('--primary', color.primary);
-    document.documentElement.style.setProperty('--primary-foreground', color.primaryForeground);
+  function handleThemeSelect(themeId: string) {
+    selectedTheme = themeId;
+    applyTheme(themeId);
   }
 
   function applyZoom(value: number) {
@@ -437,7 +424,7 @@
       maxBackups = (await store.get<number>('maxBackups')) ?? 3;
       compactBackup = (await store.get<boolean>('compactBackup')) ?? false;
       backupDir = (await store.get<string>('backupDir')) ?? '';
-      selectedColorIndex = (await store.get<number>('colorIndex')) ?? 0;
+      selectedTheme = (await store.get<string>('theme')) ?? DEFAULT_THEME;
       const savedZoom = (await store.get<number>('zoom')) ?? 100;
       autoUpdate = (await store.get<boolean>('autoUpdate')) ?? true;
       autoRename = (await store.get<boolean>('autoRename')) ?? false;
@@ -448,7 +435,7 @@
       zoomLevel = savedZoom;
 
       // Apply loaded display settings immediately
-      applyThemeColor(selectedColorIndex);
+      applyTheme(selectedTheme);
       applyZoom(savedZoom);
 
       // Load autostart state from backend
@@ -469,7 +456,7 @@
       await store.set('maxBackups', maxBackups);
       await store.set('compactBackup', compactBackup);
       await store.set('backupDir', backupDir);
-      await store.set('colorIndex', selectedColorIndex);
+      await store.set('theme', selectedTheme);
       await store.set('zoom', zoomLevel);
       await store.set('autoUpdate', autoUpdate);
       await store.set('autoRename', autoRename);
@@ -486,7 +473,7 @@
   // Auto-save display/general settings whenever they change
   $effect(() => {
     void proxyMode; void autoBackup; void maxBackups;
-    void compactBackup; void backupDir; void selectedColorIndex; void zoomLevel;
+    void compactBackup; void backupDir; void selectedTheme; void zoomLevel;
     void autoUpdate; void autoRename; void autoRenameModelId;
     void autoCompress; void autoCompressModelId; void autoCompressThreshold;
     if (!settingsLoaded) return;
@@ -1633,18 +1620,18 @@
 
       <div class="detail-section">
         <span class="field-label">{t.themeColor}</span>
-        <div class="color-swatches">
-          {#each themeColors as color, i}
+        <div class="theme-swatch-row">
+          {#each THEME_OPTIONS as theme}
             <button
-              class="color-swatch"
-              class:is-selected={selectedColorIndex === i}
-              style="background: {color.primary};"
-              title={language === 'en' ? color.nameEn : color.name}
-              onclick={() => applyThemeColor(i)}
+              type="button"
+              class="theme-swatch"
+              class:is-selected={selectedTheme === theme.id}
+              aria-label={language === 'en' ? theme.label : theme.labelZh}
+              title={language === 'en' ? theme.label : theme.labelZh}
+              style={`--swatch-color:${theme.preview.primary};`}
+              onclick={() => handleThemeSelect(theme.id)}
             >
-              {#if selectedColorIndex === i}
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
-              {/if}
+              <span class="theme-swatch-fill" aria-hidden="true" style={`background-color:${theme.preview.primary};`}></span>
             </button>
           {/each}
         </div>
@@ -2765,33 +2752,49 @@
   }
 
   /* ── Color Swatches ── */
-  .color-swatches {
-    display: flex;
-    gap: 0.6rem;
-    margin-top: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .color-swatch {
-    width: 2rem;
-    height: 2rem;
-    border-radius: 50%;
-    border: 2px solid transparent;
-    cursor: pointer;
+  .theme-swatch-row {
     display: flex;
     align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    overflow-x: auto;
+    padding: 0.3rem 0.2rem 0.4rem;
+    scrollbar-width: thin;
+  }
+
+  .theme-swatch {
+    appearance: none;
+    -webkit-appearance: none;
+    display: inline-flex;
+    align-items: center;
     justify-content: center;
-    color: white;
-    transition: border-color 0.15s, transform 0.15s;
+    width: 1.5rem;
+    height: 1.5rem;
+    flex: 0 0 auto;
+    padding: 0;
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background: transparent;
+    cursor: pointer;
+    transition: transform 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
   }
 
-  .color-swatch:hover {
-    transform: scale(1.12);
+  .theme-swatch-fill {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 999px;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
   }
 
-  .color-swatch.is-selected {
-    border-color: var(--foreground);
-    box-shadow: 0 0 0 2px var(--background), 0 0 0 4px var(--foreground);
+  .theme-swatch:hover {
+    transform: translateY(-1px);
+    opacity: 0.92;
+  }
+
+  .theme-swatch.is-selected {
+    border-color: var(--swatch-color);
+    transform: scale(1.08);
   }
 
   /* ── Zoom ── */

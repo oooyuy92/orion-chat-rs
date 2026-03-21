@@ -72,6 +72,9 @@ importers:
       '@tauri-apps/cli':
         specifier: ^2.10.0
         version: 2.10.0
+      lightningcss:
+        specifier: 1.31.1
+        version: 1.31.1
       svelte:
         specifier: ^5.53.6
         version: 5.53.6
