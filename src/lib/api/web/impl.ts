@@ -63,6 +63,93 @@ async function del<T>(path: string): Promise<T> {
   return res.json();
 }
 
+/**
+ * Poll for message updates until completion.
+ * Used for tracking assistant message generation progress.
+ */
+async function pollMessage(
+  conversationId: string,
+  messageId: string,
+  onEvent: ChatEventHandler
+): Promise<Message> {
+  const POLL_INTERVAL = 500; // 500ms
+  const TIMEOUT = 5 * 60 * 1000; // 5 minutes
+  const startTime = Date.now();
+
+  let lastContent = '';
+  let lastReasoning = '';
+  let isDone = false;
+
+  onEvent({ type: 'started', messageId });
+
+  while (!isDone) {
+    if (Date.now() - startTime > TIMEOUT) {
+      onEvent({ type: 'error', messageId, message: 'Polling timeout after 5 minutes' });
+      throw new Error('Polling timeout');
+    }
+
+    try {
+      const pagedMessages = await get<PagedMessages>(`/conversations/${conversationId}/messages?limit=10`);
+      const latestMessage = pagedMessages.messages.find(m => m.id === messageId);
+
+      if (!latestMessage) {
+        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+        continue;
+      }
+
+      // Check for content delta
+      if (latestMessage.content !== lastContent) {
+        const delta = latestMessage.content.slice(lastContent.length);
+        if (delta) {
+          onEvent({ type: 'delta', messageId, content: delta });
+          lastContent = latestMessage.content;
+        }
+      }
+
+      // Check for reasoning delta
+      if (latestMessage.reasoning && latestMessage.reasoning !== lastReasoning) {
+        const delta = latestMessage.reasoning.slice(lastReasoning.length);
+        if (delta) {
+          onEvent({ type: 'reasoning', messageId, content: delta });
+          lastReasoning = latestMessage.reasoning;
+        }
+      }
+
+      // Check if done
+      if (latestMessage.status === 'done') {
+        if (latestMessage.tokenCount !== null) {
+          const totalTokens = latestMessage.tokenCount;
+          const estimatedPromptTokens = Math.floor(totalTokens * 0.3);
+          const estimatedCompletionTokens = totalTokens - estimatedPromptTokens;
+          onEvent({
+            type: 'usage',
+            messageId,
+            promptTokens: estimatedPromptTokens,
+            completionTokens: estimatedCompletionTokens
+          });
+        }
+        onEvent({ type: 'finished', messageId });
+        return latestMessage;
+      }
+
+      // Check for error status
+      if (latestMessage.status === 'error') {
+        onEvent({ type: 'error', messageId, message: 'Message generation failed' });
+        throw new Error('Message generation failed');
+      }
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      onEvent({ type: 'error', messageId, message: errorMessage });
+      throw error;
+    }
+
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+  }
+
+  throw new Error('Polling ended without completion');
+}
+
 export const webApi = {
   // Conversations
   createConversation(title: string, assistantId?: string, modelId?: string): Promise<Conversation> {
@@ -101,35 +188,42 @@ export const webApi = {
     const qs = params.toString();
     return get(`/conversations/${conversationId}/messages${qs ? `?${qs}` : ''}`);
   },
-  sendMessage(conversationId: string, content: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
-    return new Promise((resolve, reject) => {
-      let lastMessage: Message | null = null;
-      streamRequest('/api/chat/send', { conversationId, content, modelId, commonParams: commonParams ?? null, providerParams: providerParams ?? null }, (event) => {
-        onEvent(event);
-        if (event.type === 'finished') {
-          // message will be fetched by the caller after stream ends
-        }
-      }).then(() => resolve(lastMessage as unknown as Message)).catch(reject);
+  async sendMessage(conversationId: string, content: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
+    const response = await post<{ userMessage: Message; assistantMessage: Message }>(`/conversations/${conversationId}/messages`, {
+      content,
+      modelId,
+      commonParams: commonParams ?? null,
+      providerParams: providerParams ?? null,
     });
+
+    const { assistantMessage } = response;
+    return pollMessage(conversationId, assistantMessage.id, onEvent);
   },
-  sendMessageGroup(conversationId: string, content: string, modelIds: string[], onEvent: ChatEventHandler): Promise<Message[]> {
+  async sendMessageGroup(conversationId: string, content: string, modelIds: string[], onEvent: ChatEventHandler): Promise<Message[]> {
+    // For group messages, we still use SSE as it's more complex to poll multiple messages
+    // This is acceptable as group messages are less common
     return new Promise((resolve, reject) => {
       streamRequest('/api/chat/send-group', { conversationId, content, modelIds }, onEvent)
         .then(() => resolve([]))
         .catch(reject);
     });
   },
-  resendMessage(conversationId: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
-    return new Promise((resolve, reject) => {
-      streamRequest('/api/chat/resend', { conversationId, modelId, commonParams: commonParams ?? null, providerParams: providerParams ?? null }, onEvent)
-        .then(() => resolve({} as unknown as Message))
-        .catch(reject);
+  async resendMessage(conversationId: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
+    const response = await post<{ assistantMessage: Message }>('/chat/resend', {
+      conversationId,
+      modelId,
+      commonParams: commonParams ?? null,
+      providerParams: providerParams ?? null,
     });
+
+    const { assistantMessage } = response;
+    return pollMessage(conversationId, assistantMessage.id, onEvent);
   },
   stopGeneration(conversationId: string): Promise<void> {
     return post('/chat/stop', { conversationId });
   },
-  compressConversation(conversationId: string, modelId: string, onEvent: ChatEventHandler): Promise<Message[]> {
+  async compressConversation(conversationId: string, modelId: string, onEvent: ChatEventHandler): Promise<Message[]> {
+    // For compress, we still use SSE as it's a complex operation
     return new Promise((resolve, reject) => {
       streamRequest('/api/chat/compress', { conversationId, modelId }, onEvent)
         .then(() => resolve([]))
@@ -162,19 +256,29 @@ export const webApi = {
   },
 
   // Versions
-  generateVersion(conversationId: string, messageId: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
-    return new Promise((resolve, reject) => {
-      streamRequest('/api/chat/generate-version', { conversationId, messageId, modelId, commonParams: commonParams ?? null, providerParams: providerParams ?? null }, onEvent)
-        .then(() => resolve({} as unknown as Message))
-        .catch(reject);
+  async generateVersion(conversationId: string, messageId: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
+    const response = await post<{ newMessage: Message }>('/chat/generate-version', {
+      conversationId,
+      messageId,
+      modelId,
+      commonParams: commonParams ?? null,
+      providerParams: providerParams ?? null,
     });
+
+    const { newMessage } = response;
+    return pollMessage(conversationId, newMessage.id, onEvent);
   },
-  regenerateMessage(conversationId: string, messageId: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
-    return new Promise((resolve, reject) => {
-      streamRequest('/api/chat/regenerate', { conversationId, messageId, modelId, commonParams: commonParams ?? null, providerParams: providerParams ?? null }, onEvent)
-        .then(() => resolve({} as unknown as Message))
-        .catch(reject);
+  async regenerateMessage(conversationId: string, messageId: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
+    const response = await post<{ newMessage: Message }>('/chat/regenerate', {
+      conversationId,
+      messageId,
+      modelId,
+      commonParams: commonParams ?? null,
+      providerParams: providerParams ?? null,
     });
+
+    const { newMessage } = response;
+    return pollMessage(conversationId, newMessage.id, onEvent);
   },
   switchVersion(versionGroupId: string, versionNumber: number): Promise<void> {
     return post(`/versions/${versionGroupId}/switch`, { versionNumber });
