@@ -14,6 +14,7 @@
     SidebarMenuItem,
     SidebarMenuButton,
   } from '$lib/components/ui/sidebar';
+  import { Button } from '$lib/components/ui/button';
 
   type ConversationSelection = {
     conversationId: string;
@@ -469,7 +470,7 @@
 
 <div class="conversation-sidebar">
   <div class="sidebar-head">
-    <button onclick={handleNewChat} class="new-chat-button">{i18n.t.newChat}</button>
+    <Button onclick={handleNewChat} class="w-full">{i18n.t.newChat}</Button>
     <input
       type="text"
       class="search-input"
@@ -592,7 +593,6 @@
     gap: 0.55rem;
   }
 
-  .new-chat-button,
   .search-input {
     width: 100%;
     border: 1px solid var(--border);
@@ -602,18 +602,6 @@
     font-size: 0.84rem;
     padding: 0.58rem 0.7rem;
     box-sizing: border-box;
-  }
-
-  .new-chat-button {
-    font-weight: 580;
-    cursor: pointer;
-  }
-
-  .new-chat-button:hover {
-    background: var(--muted);
-  }
-
-  .search-input {
     outline: none;
   }
 
