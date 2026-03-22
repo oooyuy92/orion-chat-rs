@@ -6,6 +6,7 @@ pub mod models;
 pub mod paste_storage;
 pub mod providers;
 pub mod state;
+pub mod web_server;
 
 use std::sync::Arc;
 
