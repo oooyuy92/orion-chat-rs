@@ -83,6 +83,17 @@ open http://localhost:28080
 
 ### 方式 2: 桌面应用
 
+#### 下载安装包 (推荐)
+
+📥 [下载最新版本](https://github.com/oooyuy92/orion-chat-rs/releases/latest)
+
+支持平台:
+- **Windows**: `.msi` 或 `.exe` 安装包
+- **macOS**: `.dmg` 或 `.app` 应用包
+- **Linux**: `.deb`, `.AppImage` 或 `.rpm` 安装包
+
+#### 本地开发
+
 ```bash
 # 安装依赖
 pnpm install
