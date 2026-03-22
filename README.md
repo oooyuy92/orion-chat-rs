@@ -13,6 +13,33 @@ Orion Chat is a desktop AI chat client built with **Tauri v2**, **SvelteKit**, a
 - Markdown export / JSON export, local backup, cache cleanup, and app data reset
 - Responsive Svelte 5 UI with shadcn-svelte style components
 
+## Web 版本部署 (PWA + Docker)
+
+Orion Chat 现在支持 Web 版本部署,可以通过 Docker 快速部署私有化实例。
+
+### 快速开始
+
+```bash
+# 克隆仓库
+git clone <repo-url>
+cd orion-chat-rs
+
+# 使用 Docker Compose 部署
+docker compose up -d
+
+# 访问应用
+open http://localhost:28080
+```
+
+### PWA 功能
+
+- 📱 可安装到主屏幕
+- 🔄 轮询架构,支持后台生成
+- 📴 离线浏览已加载的对话
+- 🔒 私有化部署,数据完全自主
+
+详细部署文档请参考: [docs/deployment.md](docs/deployment.md)
+
 ## Tech Stack
 
 - Frontend: SvelteKit, Svelte 5, Tailwind CSS 4
