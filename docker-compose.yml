@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  orion-chat:
+    build: .
+    ports:
+      - "28080:28080"
+    volumes:
+      - orion-data:/data
+    restart: unless-stopped
+    environment:
+      - DATABASE_PATH=/data/orion.db
+      - DATA_DIR=/data
+      - PORT=28080
+
+volumes:
+  orion-data:
