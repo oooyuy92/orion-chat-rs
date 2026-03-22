@@ -3,6 +3,7 @@
   import { load as loadStore } from '@tauri-apps/plugin-store';
   import type { Assistant, Conversation, SearchSidebarResult } from '$lib/types';
   import { api } from '$lib/utils/invoke';
+  import { waitForTauriReady } from '$lib/api/platform';
   import { groupConversationsByTime } from '$lib/utils/date';
   import { i18n, type ConversationGroupKey } from '$lib/stores/i18n.svelte';
   import { titleUpdates, assistantUpdates, conversationCreated, streamingConversations } from '$lib/stores/conversations';
@@ -357,6 +358,7 @@
 
   async function loadConversations() {
     try {
+      await waitForTauriReady();
       conversations = await api.listConversations();
     } catch (e) {
       console.error(e);
