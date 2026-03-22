@@ -1,0 +1,63 @@
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+.pnpm-debug.log
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build artifacts
+build/
+dist/
+.svelte-kit/
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Worktrees
+.worktrees/
+
+# Documentation
+docs/
+*.md
+README.md
+
+# Test files
+*.test.js
+*.test.ts
+*.spec.js
+*.spec.ts
+
+# Misc
+.cache/
+tmp/
+temp/
