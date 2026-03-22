@@ -3,20 +3,22 @@ FROM node:20-alpine AS frontend-builder
 
 WORKDIR /app
 
+# Install pnpm
+RUN npm install -g pnpm
+
 # Copy package files for dependency installation
-COPY package.json package-lock.json ./
+COPY package.json pnpm-lock.yaml ./
 
 # Install dependencies
-RUN npm ci
+RUN pnpm install --frozen-lockfile
 
 # Copy frontend source code
 COPY src ./src
 COPY static ./static
 COPY svelte.config.js tsconfig.json vite.config.ts ./
-COPY tailwind.config.ts ./
 
 # Build frontend
-RUN npm run build
+RUN pnpm run build
 
 # Stage 2: Backend Build
 FROM rust:1.75-alpine AS backend-builder
