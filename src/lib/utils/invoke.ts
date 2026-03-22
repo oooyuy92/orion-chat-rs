@@ -244,7 +244,13 @@ searchSidebarResults(query: string): Promise<SearchSidebarResult[]> {
   },
 };
 
+const currentApi = () => (isTauri() ? tauriApi : webApi);
+
 // 根据运行环境自动选择 API 实现
 // Tauri 桌面端：使用 IPC invoke
 // Web 端（Docker 部署）：使用 HTTP fetch
-export const api = isTauri() ? tauriApi : webApi;
+export const api: typeof tauriApi = new Proxy({} as typeof tauriApi, {
+  get(_target, prop) {
+    return currentApi()[prop as keyof typeof tauriApi];
+  },
+});
