@@ -1470,3 +1470,156 @@ pub async fn resend_message(
     let message = state.db.with_conn(|conn| db::messages::get(conn, &assistant_message_id))?;
     Ok(Json(message))
 }
+
+/// Compress/summarize a conversation with streaming
+pub async fn compress_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<Message>, AppError> {
+    // Get conversation messages
+    let messages = state.db.with_conn(|conn| {
+        db::messages::list_by_conversation(conn, &conversation_id)
+    })?;
+
+    if messages.is_empty() {
+        return Err(AppError::NotFound("No messages in conversation".into()));
+    }
+
+    // Get model_id from last assistant message or use default
+    let model_id = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant && m.model_id.is_some())
+        .and_then(|m| m.model_id.clone())
+        .ok_or_else(|| AppError::Provider("No model_id found".into()))?;
+
+    // Create a system message for compression
+    let _compress_prompt = "请用简洁的语言总结以上对话的核心内容，保留关键信息和结论。";
+
+    // Create assistant message for the summary
+    let summary_message_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let summary_message = Message {
+        id: summary_message_id.clone(),
+        conversation_id: conversation_id.clone(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: Some(model_id.clone()),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at: now,
+        version_group_id: None,
+        version_number: 1,
+        total_versions: 1,
+    };
+
+    state.db.with_conn(|conn| db::messages::create(conn, &summary_message))?;
+
+    // Build custom common params for compression (shorter response)
+    let common_params = CommonParams {
+        temperature: Some(0.3), // Lower temperature for more focused summary
+        top_p: None,
+        max_tokens: Some(500), // Limit summary length
+        stream: true,
+    };
+
+    // Spawn background generation task with compression prompt
+    super::background_tasks::spawn_generation_task(
+        state.clone(),
+        conversation_id,
+        summary_message_id.clone(),
+        model_id,
+        Some(common_params),
+        None,
+    )
+    .await?;
+
+    // Return the summary message
+    let message = state.db.with_conn(|conn| db::messages::get(conn, &summary_message_id))?;
+    Ok(Json(message))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupSendRequest {
+    pub messages: Vec<GroupMessage>,
+    pub model_id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupMessage {
+    pub content: String,
+}
+
+/// Send multiple messages in a group with streaming responses
+pub async fn group_send_messages(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<GroupSendRequest>,
+) -> Result<Json<Vec<Message>>, AppError> {
+    if req.messages.is_empty() {
+        return Err(AppError::Provider("No messages provided".into()));
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut created_messages = Vec::new();
+
+    // Create all user and assistant message pairs
+    for group_msg in req.messages {
+        // Create user message
+        let user_message_id = uuid::Uuid::new_v4().to_string();
+        let user_message = Message {
+            id: user_message_id.clone(),
+            conversation_id: conversation_id.clone(),
+            role: Role::User,
+            content: group_msg.content,
+            reasoning: None,
+            model_id: Some(req.model_id.clone()),
+            status: MessageStatus::Done,
+            token_count: None,
+            created_at: now.clone(),
+            version_group_id: None,
+            version_number: 1,
+            total_versions: 1,
+        };
+
+        state.db.with_conn(|conn| db::messages::create(conn, &user_message))?;
+
+        // Create assistant message
+        let assistant_message_id = uuid::Uuid::new_v4().to_string();
+        let assistant_message = Message {
+            id: assistant_message_id.clone(),
+            conversation_id: conversation_id.clone(),
+            role: Role::Assistant,
+            content: String::new(),
+            reasoning: None,
+            model_id: Some(req.model_id.clone()),
+            status: MessageStatus::Streaming,
+            token_count: None,
+            created_at: now.clone(),
+            version_group_id: None,
+            version_number: 1,
+            total_versions: 1,
+        };
+
+        state.db.with_conn(|conn| db::messages::create(conn, &assistant_message))?;
+
+        // Spawn background generation task for this message
+        super::background_tasks::spawn_generation_task(
+            state.clone(),
+            conversation_id.clone(),
+            assistant_message_id.clone(),
+            req.model_id.clone(),
+            None,
+            None,
+        )
+        .await?;
+
+        created_messages.push(assistant_message);
+    }
+
+    Ok(Json(created_messages))
+}
