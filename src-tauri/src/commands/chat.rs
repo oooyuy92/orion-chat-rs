@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::State;
 
+use crate::channel::ChatEventSender;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
@@ -175,7 +176,7 @@ async fn run_stream(
     msg_id: &str,
     conversation_id: &str,
     history: Vec<Message>,
-    channel: &Channel<ChatEvent>,
+    channel: &ChatEventSender,
     common_params: Option<CommonParams>,
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
@@ -271,7 +272,7 @@ async fn do_stream(
     conversation_id: &str,
     model_id: &str,
     request_model: &str,
-    channel: &Channel<ChatEvent>,
+    channel: &ChatEventSender,
     common_params: Option<CommonParams>,
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
@@ -326,6 +327,7 @@ pub async fn send_message(
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
     let (provider, provider_type, request_model) = resolve_provider(&state, &model_id).await?;
+    let sender = ChatEventSender::from(channel);
 
     let now = chrono_now();
 
@@ -355,7 +357,7 @@ pub async fn send_message(
             .with_conn(|conn| db::messages::update_text(conn, &user_message_id, &persisted_content))?;
     }
 
-    do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &request_model, &channel, common_params, provider_params).await
+    do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &request_model, &sender, common_params, provider_params).await
 }
 
 #[tauri::command]
@@ -368,8 +370,9 @@ pub async fn resend_message(
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
     let (provider, provider_type, request_model) = resolve_provider(&state, &model_id).await?;
+    let sender = ChatEventSender::from(channel);
 
-    do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &request_model, &channel, common_params, provider_params).await
+    do_stream(&state, provider, &provider_type, &conversation_id, &model_id, &request_model, &sender, common_params, provider_params).await
 }
 
 /// Generate a new version of an AI response (+1 button).
@@ -384,6 +387,7 @@ pub async fn generate_version(
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
     let (provider, provider_type, request_model) = resolve_provider(&state, &model_id).await?;
+    let sender = ChatEventSender::from(channel);
 
     // 1. Initialize version group if needed
     state
@@ -462,7 +466,7 @@ pub async fn generate_version(
         &new_msg_id,
         &conversation_id,
         history,
-        &channel,
+        &sender,
         common_params,
         provider_params,
     )
@@ -481,6 +485,7 @@ pub async fn regenerate_message(
     provider_params: Option<ProviderParams>,
 ) -> AppResult<Message> {
     let (provider, provider_type, request_model) = resolve_provider(&state, &model_id).await?;
+    let sender = ChatEventSender::from(channel);
 
     // Get version info
     let version_group_id: Option<String> = state.db.with_conn(|conn| {
@@ -522,7 +527,7 @@ pub async fn regenerate_message(
         &message_id,
         &conversation_id,
         history,
-        &channel,
+        &sender,
         common_params,
         provider_params,
     )
@@ -538,6 +543,7 @@ pub async fn compress_conversation(
     channel: Channel<ChatEvent>,
 ) -> AppResult<Vec<Message>> {
     let (provider, provider_type, request_model) = resolve_provider(&state, &model_id).await?;
+    let sender = ChatEventSender::from(channel);
 
     // Load all messages
     let history = state
@@ -575,14 +581,14 @@ pub async fn compress_conversation(
         provider_params: default_provider_params(&provider_type),
     };
 
-    let _ = channel.send(ChatEvent::Started {
+    let _ = sender.send(ChatEvent::Started {
         message_id: "compress".to_string(),
     });
 
     let cancel_rx = state.create_cancel_token(&conversation_id).await;
 
     let result = provider
-        .stream_chat(request, "compress".to_string(), channel.clone(), cancel_rx)
+        .stream_chat(request, "compress".to_string(), sender.clone(), cancel_rx)
         .await;
 
     state.remove_cancel_token(&conversation_id).await;
@@ -623,7 +629,7 @@ pub async fn compress_conversation(
                 .db
                 .with_conn(|conn| db::conversations::touch(conn, &conversation_id));
 
-            let _ = channel.send(ChatEvent::Finished {
+            let _ = sender.send(ChatEvent::Finished {
                 message_id: "compress".to_string(),
             });
 
@@ -633,7 +639,7 @@ pub async fn compress_conversation(
             Ok(messages)
         }
         Err(e) => {
-            let _ = channel.send(ChatEvent::Error {
+            let _ = sender.send(ChatEvent::Error {
                 message_id: "compress".to_string(),
                 message: e.to_string(),
             });
@@ -655,6 +661,7 @@ pub async fn send_message_group(
     if model_ids.is_empty() {
         return Err(AppError::Provider("No models specified".into()));
     }
+    let sender = ChatEventSender::from(channel);
 
     // 1. Resolve all providers upfront (fail fast if any model is invalid)
     let mut resolved: Vec<(Arc<dyn Provider>, String, String, String)> = Vec::new(); // (provider, provider_type, model_id, request_model)
@@ -772,7 +779,7 @@ pub async fn send_message_group(
 
     for (i, (provider, provider_type, _model_id, request_model)) in resolved.into_iter().enumerate() {
         let msg_id = assistant_msg_ids[i].clone();
-        let channel_clone = channel.clone();
+        let channel_clone = sender.clone();
         let conv_id = conversation_id.clone();
         let request_messages = request_messages.clone();
         let first_finished = first_finished.clone();

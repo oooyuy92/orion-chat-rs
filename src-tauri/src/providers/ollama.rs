@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tauri::ipc::Channel;
 use tokio::sync::watch;
 
+use crate::channel::ChatEventSender;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 
@@ -114,7 +114,7 @@ impl OllamaProvider {
         &self,
         message_id: &str,
         line: &str,
-        channel: &Channel<ChatEvent>,
+        channel: &ChatEventSender,
         acc: &mut StreamResult,
     ) -> AppResult<bool> {
         let json: Value = serde_json::from_str(line)?;
@@ -169,7 +169,7 @@ impl Provider for OllamaProvider {
         &self,
         request: ChatRequest,
         message_id: String,
-        channel: Channel<ChatEvent>,
+        channel: ChatEventSender,
         mut cancel: watch::Receiver<bool>,
     ) -> AppResult<StreamResult> {
         let url = format!("{}/api/chat", self.base_url);

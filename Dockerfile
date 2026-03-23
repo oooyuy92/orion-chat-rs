@@ -36,7 +36,7 @@ RUN mkdir -p src/bin && \
     echo "fn main() {}" > src/bin/web_server.rs && \
     mkdir -p src && \
     echo "pub fn lib_main() {}" > src/lib.rs && \
-    cargo build --release --bin web_server && \
+    cargo build --release --bin web_server --no-default-features && \
     rm -rf src
 
 # Copy actual source code
@@ -44,7 +44,7 @@ COPY src-tauri/src ./src
 COPY src-tauri/build.rs ./
 
 # Build the web_server binary
-RUN cargo build --release --bin web_server
+RUN cargo build --release --bin web_server --no-default-features
 
 # Stage 3: Runtime Image
 FROM alpine:latest

@@ -4,11 +4,11 @@ pub mod ollama;
 pub mod openai_compat;
 
 use async_trait::async_trait;
-use tauri::ipc::Channel;
 use tokio::sync::watch;
 
+use crate::channel::ChatEventSender;
 use crate::error::AppResult;
-use crate::models::{ChatEvent, ChatRequest, ModelInfo};
+use crate::models::{ChatRequest, ModelInfo};
 
 /// Accumulated result from a streaming chat completion.
 #[derive(Debug, Clone, Default)]
@@ -25,7 +25,7 @@ pub trait Provider: Send + Sync {
         &self,
         request: ChatRequest,
         message_id: String,
-        channel: Channel<ChatEvent>,
+        channel: ChatEventSender,
         cancel: watch::Receiver<bool>,
     ) -> AppResult<StreamResult>;
 

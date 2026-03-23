@@ -2,9 +2,9 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use tauri::ipc::Channel;
 use tokio::sync::watch;
 
+use crate::channel::ChatEventSender;
 use crate::error::{AppError, AppResult};
 use crate::models::*;
 
@@ -109,7 +109,7 @@ impl GeminiProvider {
         &self,
         message_id: &str,
         data: &str,
-        channel: &Channel<ChatEvent>,
+        channel: &ChatEventSender,
         acc: &mut StreamResult,
     ) -> AppResult<()> {
         // Skip non-JSON lines (e.g. empty, "[DONE]")
@@ -179,7 +179,7 @@ impl Provider for GeminiProvider {
         &self,
         request: ChatRequest,
         message_id: String,
-        channel: Channel<ChatEvent>,
+        channel: ChatEventSender,
         mut cancel: watch::Receiver<bool>,
     ) -> AppResult<StreamResult> {
         let url = format!(

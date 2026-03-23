@@ -1,4 +1,6 @@
+#[cfg(feature = "desktop")]
 pub mod commands;
+pub mod channel;
 pub mod core;
 pub mod db;
 pub mod error;
@@ -8,9 +10,10 @@ pub mod providers;
 pub mod state;
 pub mod web_server;
 
-use std::sync::Arc;
-
+#[cfg(feature = "desktop")]
 pub fn run() {
+    use std::sync::Arc;
+
     // Determine app data directory
     let data_dir = dirs::data_dir()
         .expect("Failed to get data directory")
