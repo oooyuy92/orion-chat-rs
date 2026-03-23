@@ -26,7 +26,7 @@ FROM rust:alpine AS backend-builder
 WORKDIR /app
 
 # Install build dependencies
-RUN apk add --no-cache musl-dev openssl-dev pkgconfig
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
 
 # Copy Cargo files for dependency caching
 COPY src-tauri/Cargo.toml src-tauri/Cargo.lock ./
