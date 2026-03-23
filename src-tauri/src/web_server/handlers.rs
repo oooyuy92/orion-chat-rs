@@ -494,3 +494,703 @@ pub async fn update_provider_models_visibility(
         .map(Json)
 }
 
+
+// Conversation extended handlers
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PinConversationRequest {
+    pub is_pinned: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateConversationAssistantRequest {
+    pub assistant_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateConversationModelRequest {
+    pub model_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateTitleRequest {
+    pub model_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkConversationRequest {
+    pub up_to_message_id: String,
+}
+
+pub async fn pin_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<PinConversationRequest>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| db::conversations::update_pin(conn, &id, req.is_pinned))?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn update_conversation_assistant(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateConversationAssistantRequest>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| {
+        db::conversations::get(conn, &id)?;
+        core::conversation::ensure_assistant_exists(conn, req.assistant_id.as_deref())?;
+        core::conversation::ensure_conversation_assistant_can_change(conn, &id)?;
+        db::conversations::update_assistant(conn, &id, req.assistant_id.as_deref())
+    })?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn update_conversation_model(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateConversationModelRequest>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| {
+        db::conversations::get(conn, &id)?;
+        core::conversation::ensure_model_exists(conn, req.model_id.as_deref())?;
+        db::conversations::update_model(conn, &id, req.model_id.as_deref())
+    })?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn generate_conversation_title(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<GenerateTitleRequest>,
+) -> Result<Json<String>, AppError> {
+    use reqwest::Client;
+    use serde_json::json;
+
+    let messages = state.db.with_conn(|conn| db::messages::list_by_conversation(conn, &conversation_id))?;
+    if messages.is_empty() {
+        return Ok(Json(String::new()));
+    }
+
+    let context = messages
+        .iter()
+        .filter(|m| !matches!(m.status, MessageStatus::Error | MessageStatus::Streaming))
+        .take(6)
+        .map(|m| {
+            let role = if matches!(m.role, Role::User) { "用户" } else { "助手" };
+            let content: String = m.content.chars().take(200).collect();
+            format!("{role}: {content}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let prompt = format!(
+        "根据以下对话，用不超过10个字给对话起一个简洁的标题，只输出标题文字，不加标点符号或解释。\n\n{context}"
+    );
+
+    let (provider_type, api_key, base_url) = state.db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT p.type, p.api_key, p.base_url \
+             FROM models m JOIN providers p ON m.provider_id = p.id WHERE m.id = ?1",
+            [&req.model_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .map_err(|_| AppError::NotFound(format!("Model {}", req.model_id)))
+    })?;
+
+    let client = Client::new();
+
+    let raw = match provider_type.as_str() {
+        "anthropic" => {
+            let key = api_key.ok_or_else(|| AppError::Provider("No API key".into()))?;
+            let base = base_url.as_deref().unwrap_or("https://api.anthropic.com");
+            let resp = client
+                .post(format!("{base}/v1/messages"))
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&json!({
+                    "model": req.model_id,
+                    "max_tokens": 30,
+                    "messages": [{"role": "user", "content": prompt}]
+                }))
+                .send()
+                .await
+                .map_err(|e| AppError::Provider(e.to_string()))?;
+            let val: serde_json::Value = resp.json().await.map_err(|e| AppError::Provider(e.to_string()))?;
+            val["content"][0]["text"].as_str().unwrap_or("").trim().to_string()
+        }
+        "gemini" => {
+            let key = api_key.ok_or_else(|| AppError::Provider("No API key".into()))?;
+            let base = base_url.as_deref().unwrap_or("https://generativelanguage.googleapis.com");
+            let url = format!("{base}/v1beta/models/{}:generateContent?key={key}", req.model_id);
+            let resp = client
+                .post(url)
+                .json(&json!({
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 30}
+                }))
+                .send()
+                .await
+                .map_err(|e| AppError::Provider(e.to_string()))?;
+            let val: serde_json::Value = resp.json().await.map_err(|e| AppError::Provider(e.to_string()))?;
+            val["candidates"][0]["content"]["parts"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        }
+        "ollama" => {
+            let base = base_url.as_deref().unwrap_or("http://127.0.0.1:11434");
+            let resp = client
+                .post(format!("{base}/api/chat"))
+                .json(&json!({
+                    "model": req.model_id,
+                    "stream": false,
+                    "messages": [{"role": "user", "content": prompt}]
+                }))
+                .send()
+                .await
+                .map_err(|e| AppError::Provider(e.to_string()))?;
+            let val: serde_json::Value = resp.json().await.map_err(|e| AppError::Provider(e.to_string()))?;
+            val["message"]["content"].as_str().unwrap_or("").trim().to_string()
+        }
+        _ => {
+            let key = api_key.ok_or_else(|| AppError::Provider("No API key".into()))?;
+            let base = base_url.as_deref().unwrap_or("https://api.openai.com");
+            let resp = client
+                .post(format!("{base}/chat/completions"))
+                .bearer_auth(&key)
+                .json(&json!({
+                    "model": req.model_id,
+                    "stream": false,
+                    "max_tokens": 30,
+                    "temperature": 0.3,
+                    "messages": [{"role": "user", "content": prompt}]
+                }))
+                .send()
+                .await
+                .map_err(|e| AppError::Provider(e.to_string()))?;
+            let val: serde_json::Value = resp.json().await.map_err(|e| AppError::Provider(e.to_string()))?;
+            val["choices"][0]["message"]["content"].as_str().unwrap_or("").trim().to_string()
+        }
+    };
+
+    let title: String = raw
+        .trim_matches(|c| matches!(c, '"' | '\'' | '\n'))
+        .chars()
+        .take(15)
+        .collect();
+    Ok(Json(title))
+}
+
+pub async fn fork_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(source_conversation_id): Path<String>,
+    Json(req): Json<ForkConversationRequest>,
+) -> Result<Json<Conversation>, AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let source = state.db.with_conn(|conn| db::conversations::get(conn, &source_conversation_id))?;
+
+    let new_conv = Conversation {
+        id: uuid::Uuid::new_v4().to_string(),
+        title: format!("{} 副本", source.title),
+        assistant_id: source.assistant_id.clone(),
+        model_id: source.model_id.clone(),
+        is_pinned: false,
+        sort_order: 0,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+    };
+    state.db.with_conn(|conn| db::conversations::create(conn, &new_conv))?;
+
+    let all_messages = state.db.with_conn(|conn| db::messages::list_by_conversation(conn, &source_conversation_id))?;
+
+    let cut_idx = all_messages
+        .iter()
+        .position(|m| m.id == req.up_to_message_id)
+        .ok_or_else(|| AppError::NotFound(format!("Message {}", req.up_to_message_id)))?;
+
+    let messages_to_copy = &all_messages[..=cut_idx];
+
+    state.db.with_conn(|conn| {
+        for msg in messages_to_copy {
+            let new_msg = Message {
+                id: uuid::Uuid::new_v4().to_string(),
+                conversation_id: new_conv.id.clone(),
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+                model_id: msg.model_id.clone(),
+                reasoning: msg.reasoning.clone(),
+                token_count: msg.token_count,
+                status: MessageStatus::Done,
+                created_at: msg.created_at.clone(),
+                version_group_id: None,
+                version_number: 1,
+                total_versions: 1,
+            };
+            db::messages::create(conn, &new_msg)?;
+        }
+        Ok(())
+    })?;
+
+    Ok(Json(new_conv))
+}
+
+// Message operation handlers
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateMessageContentRequest {
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteMessagesAfterRequest {
+    pub message_id: String,
+}
+
+pub async fn delete_message(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| {
+        let _ = db::messages::soft_delete_version(conn, &id)?;
+        Ok(())
+    })?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn restore_message(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| db::messages::restore(conn, &id))?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn delete_messages_after(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<DeleteMessagesAfterRequest>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| db::messages::delete_after(conn, &conversation_id, &req.message_id))?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn delete_messages_from(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<DeleteMessagesAfterRequest>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| db::messages::delete_from(conn, &conversation_id, &req.message_id))?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn update_message_content(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateMessageContentRequest>,
+) -> Result<StatusCode, AppError> {
+    let (conversation_id, created_at): (String, String) = state.db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT conversation_id, created_at FROM messages WHERE id = ?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|_| AppError::NotFound(format!("Message {id}")))
+    })?;
+
+    core::conversation::delete_message_pastes(&state, &id)?;
+    let persisted_content = core::conversation::persist_external_pastes(&state, &conversation_id, &id, &req.content, &created_at)?;
+    state.db.with_conn(|conn| db::messages::update_text(conn, &id, &persisted_content))?;
+    Ok(StatusCode::OK)
+}
+
+// Assistant CRUD handlers
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAssistantRequest {
+    pub name: String,
+    pub system_prompt: Option<String>,
+    pub model_id: Option<String>,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub max_tokens: Option<u32>,
+}
+
+pub async fn create_assistant(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<CreateAssistantRequest>,
+) -> Result<Json<Assistant>, AppError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let assistant = Assistant {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: req.name,
+        icon: None,
+        system_prompt: req.system_prompt,
+        model_id: req.model_id,
+        temperature: req.temperature,
+        top_p: req.top_p,
+        max_tokens: req.max_tokens,
+        extra_params: serde_json::json!({}),
+        sort_order: 0,
+        created_at: now,
+    };
+    state.db.with_conn(|conn| db::assistants::create(conn, &assistant))?;
+    Ok(Json(assistant))
+}
+
+pub async fn update_assistant(
+    State(state): State<Arc<AppState>>,
+    Path(_id): Path<String>,
+    Json(assistant): Json<Assistant>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| db::assistants::update(conn, &assistant))?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn delete_assistant(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| db::assistants::delete(conn, &id))?;
+    Ok(StatusCode::OK)
+}
+
+// Paste handlers
+pub async fn get_paste_blob_content(
+    State(state): State<Arc<AppState>>,
+    Path(paste_id): Path<String>,
+) -> Result<Json<String>, AppError> {
+    let relative_path = core::conversation::resolve_paste_blob_path(&state, &paste_id)?;
+    let content = crate::paste_storage::read_paste_blob(&state.data_dir, &relative_path)?;
+    Ok(Json(content))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasteContentRequest {
+    pub content: String,
+}
+
+pub async fn hydrate_paste_content(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PasteContentRequest>,
+) -> Result<Json<String>, AppError> {
+    let result = crate::paste_storage::hydrate_paste_refs_to_legacy_markers(&state.data_dir, &req.content, &|paste_id| {
+        core::conversation::resolve_paste_blob_path(&state, paste_id)
+    })?;
+    Ok(Json(result))
+}
+
+pub async fn expand_paste_content(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PasteContentRequest>,
+) -> Result<Json<String>, AppError> {
+    let result = crate::paste_storage::expand_paste_refs_to_plain_text(&state.data_dir, &req.content, &|paste_id| {
+        core::conversation::resolve_paste_blob_path(&state, paste_id)
+    })?;
+    Ok(Json(result))
+}
+
+// Version handlers
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchVersionRequest {
+    pub version_number: u32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VersionInfo {
+    pub version_number: u32,
+    pub model_id: Option<String>,
+    pub id: String,
+}
+
+pub async fn switch_version(
+    State(state): State<Arc<AppState>>,
+    Path(version_group_id): Path<String>,
+    Json(req): Json<SwitchVersionRequest>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| db::messages::switch_active_version(conn, &version_group_id, req.version_number))?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn list_versions(
+    State(state): State<Arc<AppState>>,
+    Path(version_group_id): Path<String>,
+) -> Result<Json<Vec<VersionInfo>>, AppError> {
+    let msgs = state.db.with_conn(|conn| db::messages::list_versions(conn, &version_group_id))?;
+    let versions = msgs
+        .into_iter()
+        .map(|m| VersionInfo {
+            version_number: m.version_number,
+            model_id: m.model_id,
+            id: m.id,
+        })
+        .collect();
+    Ok(Json(versions))
+}
+
+pub async fn list_version_messages(
+    State(state): State<Arc<AppState>>,
+    Path(version_group_id): Path<String>,
+) -> Result<Json<Vec<Message>>, AppError> {
+    let msgs = state.db.with_conn(|conn| db::messages::list_versions(conn, &version_group_id))?;
+    Ok(Json(msgs))
+}
+
+pub async fn get_version_models(
+    State(state): State<Arc<AppState>>,
+    Path(version_group_id): Path<String>,
+) -> Result<Json<Vec<(u32, String)>>, AppError> {
+    let models = state.db.with_conn(|conn| db::messages::get_version_models(conn, &version_group_id))?;
+    Ok(Json(models))
+}
+
+// Search handlers
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchQuery {
+    pub query: String,
+}
+
+pub async fn search_messages(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<SearchQuery>,
+) -> Result<Json<Vec<Message>>, AppError> {
+    use std::collections::HashSet;
+
+    let results = state.db.with_conn(|conn| {
+        let mut results = db::messages::search(conn, &params.query)?;
+        let mut seen = results.iter().map(|message| message.id.clone()).collect::<HashSet<_>>();
+
+        for message_id in db::paste_blobs::search_message_ids(conn, &params.query)? {
+            let message = conn.query_row(
+                "SELECT id, conversation_id, content, role, model_id, reasoning, token_completion, created_at, status, version_group_id, version_number,
+                   CASE WHEN version_group_id IS NULL THEN 1
+                   ELSE (SELECT COUNT(*) FROM messages m2 WHERE m2.version_group_id = messages.version_group_id AND m2.deleted_at IS NULL)
+                   END as total_versions
+                 FROM messages
+                 WHERE id = ?1 AND deleted_at IS NULL AND is_active_version = 1",
+                [&message_id],
+                |row| {
+                    Ok(Message {
+                        id: row.get(0)?,
+                        conversation_id: row.get(1)?,
+                        content: row.get(2)?,
+                        role: match row.get::<_, String>(3)?.as_str() {
+                            "assistant" => Role::Assistant,
+                            "system" => Role::System,
+                            _ => Role::User,
+                        },
+                        model_id: row.get(4)?,
+                        reasoning: row.get(5)?,
+                        token_count: row.get(6)?,
+                        created_at: row.get(7)?,
+                        status: match row.get::<_, String>(8)?.as_str() {
+                            "streaming" => MessageStatus::Streaming,
+                            "error" => MessageStatus::Error,
+                            _ => MessageStatus::Done,
+                        },
+                        version_group_id: row.get(9)?,
+                        version_number: row.get::<_, u32>(10).unwrap_or(1),
+                        total_versions: row.get::<_, u32>(11).unwrap_or(1),
+                    })
+                },
+            )?;
+            if seen.insert(message.id.clone()) {
+                results.push(message);
+            }
+        }
+        Ok(results)
+    })?;
+    Ok(Json(results))
+}
+
+pub async fn search_sidebar_results(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<SearchQuery>,
+) -> Result<Json<Vec<SearchSidebarResult>>, AppError> {
+    use std::collections::HashSet;
+
+    let results = state.db.with_conn(|conn| {
+        let mut seen = HashSet::new();
+        let mut results = Vec::new();
+
+        for result in db::messages::search_sidebar_results(conn, &params.query)? {
+            let key = (
+                result.conversation_id.clone(),
+                result.message_id.clone().unwrap_or_default(),
+            );
+            if seen.insert(key) {
+                results.push(result);
+            }
+        }
+
+        for result in db::paste_blobs::search_sidebar_results(conn, &params.query)? {
+            let key = (
+                result.conversation_id.clone(),
+                result.message_id.clone().unwrap_or_default(),
+            );
+            if seen.insert(key) {
+                results.push(result);
+            }
+        }
+
+        results.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(results)
+    })?;
+    Ok(Json(results))
+}
+
+// Export handlers
+pub async fn export_conversation_markdown(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<String>, AppError> {
+    let conv = state.db.with_conn(|conn| db::conversations::get(conn, &conversation_id))?;
+    let messages = state.db.with_conn(|conn| db::messages::list_by_conversation(conn, &conversation_id))?;
+
+    let mut md = format!("# {}\n\n", conv.title);
+    for msg in &messages {
+        let content = crate::paste_storage::expand_paste_refs_to_plain_text(&state.data_dir, &msg.content, &|paste_id| {
+            state.db.with_conn(|conn| Ok(db::paste_blobs::get(conn, paste_id)?.file_path))
+        })?;
+        let role_label = match msg.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::System => "System",
+        };
+        md.push_str(&format!("## {}\n\n{}\n\n", role_label, content));
+    }
+    Ok(Json(md))
+}
+
+pub async fn export_conversation_json(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<String>, AppError> {
+    let conv = state.db.with_conn(|conn| db::conversations::get(conn, &conversation_id))?;
+    let messages = state.db.with_conn(|conn| db::messages::list_by_conversation(conn, &conversation_id))?;
+
+    let expanded_messages = messages
+        .into_iter()
+        .map(|mut message| -> Result<_, AppError> {
+            message.content = crate::paste_storage::expand_paste_refs_to_plain_text(&state.data_dir, &message.content, &|paste_id| {
+                state.db.with_conn(|conn| Ok(db::paste_blobs::get(conn, paste_id)?.file_path))
+            })?;
+            Ok(message)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let export = serde_json::json!({
+        "conversation": conv,
+        "messages": expanded_messages,
+    });
+    let json = serde_json::to_string_pretty(&export)?;
+    Ok(Json(json))
+}
+
+// Settings handlers
+pub async fn get_proxy_mode(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<String>, AppError> {
+    Ok(Json(state.proxy_mode.lock().await.clone()))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetProxyModeRequest {
+    pub mode: String,
+}
+
+pub async fn set_proxy_mode(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SetProxyModeRequest>,
+) -> Result<StatusCode, AppError> {
+    *state.proxy_mode.lock().await = req.mode;
+    Ok(StatusCode::OK)
+}
+
+pub async fn reset_app_data(
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, AppError> {
+    state.db.with_conn(|conn| {
+        conn.execute_batch(
+            "DELETE FROM messages;
+             DELETE FROM conversations;
+             DELETE FROM assistants;",
+        )?;
+        Ok(())
+    })?;
+    Ok(StatusCode::OK)
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                total += dir_size(&p);
+            } else if let Ok(meta) = p.metadata() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.0} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+pub async fn get_cache_size(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<String>, AppError> {
+    let cache_dir = state.data_dir.join("cache");
+
+    if !cache_dir.exists() {
+        return Ok(Json("0 KB".to_string()));
+    }
+
+    let total = dir_size(&cache_dir);
+    Ok(Json(format_size(total)))
+}
+
+pub async fn clear_cache(
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, AppError> {
+    let cache_dir = state.data_dir.join("cache");
+
+    if cache_dir.exists() {
+        std::fs::remove_dir_all(&cache_dir)
+            .map_err(|e| AppError::Provider(e.to_string()))?;
+        std::fs::create_dir_all(&cache_dir)
+            .map_err(|e| AppError::Provider(e.to_string()))?;
+    }
+    Ok(StatusCode::OK)
+}
