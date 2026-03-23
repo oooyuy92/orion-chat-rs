@@ -12,7 +12,7 @@
   import type { ModelCombo } from '$lib/types';
   import { isManualModel, resolveModelLabel, resolveModelSecondaryLabel } from '$lib/utils/modelDisplay';
   import { loadStore } from '$lib/stores/kvStore';
-  import { getVersion } from '@tauri-apps/api/app';
+  import { isTauri } from '$lib/api/platform';
   import { i18n, type Language } from '$lib/stores/i18n.svelte';
   import { createDefaultAutoUpdaterController } from '$lib/utils/autoUpdater.js';
   import { THEME_OPTIONS, DEFAULT_THEME, applyTheme } from '$lib/utils/theme.js';
@@ -34,6 +34,7 @@
   };
 
   const language = $derived(i18n.language as Language);
+  const isDesktop = $derived(isTauri());
 
   function navLabel(item: NavItemId) {
     const isEn = language === 'en';
@@ -439,10 +440,11 @@
       applyTheme(selectedTheme);
       applyZoom(savedZoom);
 
-      // Load autostart state from backend
-      autoLaunch = await api.getAutostartEnabled();
-      // Apply proxy from backend
-      proxyMode = (await api.getProxyMode()) as 'system' | 'none';
+      // Load desktop-only settings from backend
+      if (isTauri()) {
+        autoLaunch = await api.getAutostartEnabled();
+        proxyMode = (await api.getProxyMode()) as 'system' | 'none';
+      }
       settingsLoaded = true;
     } catch (e) {
       console.error('Failed to load settings:', e);
@@ -509,12 +511,18 @@
     loadProviders();
     loadSettings().then(async () => {
       try {
-        const paths = await api.getAppPaths();
-        appDataDir = paths.dataDir;
-        appLogDir = paths.logDir;
         cacheSize = await api.getCacheSize();
-        appVersion = await getVersion();
       } catch (e) { console.error(e); }
+
+      if (isTauri()) {
+        try {
+          const paths = await api.getAppPaths();
+          appDataDir = paths.dataDir;
+          appLogDir = paths.logDir;
+          const { getVersion } = await import('@tauri-apps/api/app');
+          appVersion = await getVersion();
+        } catch (e) { console.error(e); }
+      }
     });
   });
 
@@ -1603,6 +1611,7 @@
         </label>
       </div>
 
+      {#if isDesktop}
       <div class="detail-section">
         <div class="general-switch-row">
           <span class="field-label">{t.autoLaunch}</span>
@@ -1612,6 +1621,7 @@
           </button>
         </div>
       </div>
+      {/if}
     </section>
   {:else if activeNav === 'displaySettings'}
     <section class="general-panel">
@@ -1714,6 +1724,7 @@
       <div class="detail-section">
         <span class="section-subtitle">{t.backupSection}</span>
 
+        {#if isDesktop}
         <div class="data-row">
           <span class="data-row-label">{t.backupDir}</span>
           <div class="data-row-content">
@@ -1732,6 +1743,7 @@
             <Button variant="outline" size="sm">{t.backupManager}</Button>
           </div>
         </div>
+        {/if}
 
         <div class="data-row">
           <span class="data-row-label">{t.autoBackup}</span>
@@ -1815,6 +1827,7 @@
         </a>
       </div>
 
+      {#if isDesktop}
       <div class="detail-section">
         <div class="general-switch-row">
           <span class="field-label">{t.autoUpdate}</span>
@@ -1849,6 +1862,7 @@
           {/if}
         </div>
       </div>
+      {/if}
     </section>
   {:else}
     <section class="placeholder-panel">

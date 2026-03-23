@@ -190,13 +190,13 @@ const tauriApi = {
     return invoke('delete_assistant', { id });
   },
 
-// Search
-searchMessages(query: string): Promise<Message[]> {
-  return invoke('search_messages', { query });
-},
-searchSidebarResults(query: string): Promise<SearchSidebarResult[]> {
-  return invoke('search_sidebar_results', { query });
-},
+  // Search
+  searchMessages(query: string): Promise<Message[]> {
+    return invoke('search_messages', { query });
+  },
+  searchSidebarResults(query: string): Promise<SearchSidebarResult[]> {
+    return invoke('search_sidebar_results', { query });
+  },
 
   // Export
   exportMarkdown(conversationId: string): Promise<string> {
