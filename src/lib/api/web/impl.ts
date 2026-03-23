@@ -17,7 +17,6 @@ import type {
   SearchSidebarResult,
 } from '$lib/types';
 import type { ChatEventHandler, AppPaths } from '$lib/utils/invoke';
-import { streamRequest } from './sse';
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`/api${path}`);
@@ -25,7 +24,15 @@ async function get<T>(path: string): Promise<T> {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error ?? res.statusText);
   }
-  return res.json();
+  const text = await res.text();
+  if (!text) {
+    throw new Error(`Empty response from GET ${path}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid JSON from GET ${path}: ${text.slice(0, 200)}`);
+  }
 }
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
@@ -38,7 +45,15 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error ?? res.statusText);
   }
-  return res.json();
+  const text = await res.text();
+  if (!text) {
+    throw new Error(`Empty response from POST ${path}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid JSON from POST ${path}: ${text.slice(0, 200)}`);
+  }
 }
 
 async function patch<T>(path: string, body?: unknown): Promise<T> {
@@ -51,7 +66,15 @@ async function patch<T>(path: string, body?: unknown): Promise<T> {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error ?? res.statusText);
   }
-  return res.json();
+  const text = await res.text();
+  if (!text) {
+    throw new Error(`Empty response from PATCH ${path}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid JSON from PATCH ${path}: ${text.slice(0, 200)}`);
+  }
 }
 
 async function del<T>(path: string): Promise<T> {
@@ -60,7 +83,47 @@ async function del<T>(path: string): Promise<T> {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(err.error ?? res.statusText);
   }
-  return res.json();
+  const text = await res.text();
+  if (!text) {
+    throw new Error(`Empty response from DELETE ${path}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid JSON from DELETE ${path}: ${text.slice(0, 200)}`);
+  }
+}
+
+async function postVoid(path: string, body?: unknown): Promise<void> {
+  const res = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error ?? res.statusText);
+  }
+}
+
+async function patchVoid(path: string, body?: unknown): Promise<void> {
+  const res = await fetch(`/api${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error ?? res.statusText);
+  }
+}
+
+async function delVoid(path: string): Promise<void> {
+  const res = await fetch(`/api${path}`, { method: 'DELETE' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error ?? res.statusText);
+  }
 }
 
 /**
@@ -159,19 +222,19 @@ export const webApi = {
     return get('/conversations');
   },
   updateConversationTitle(id: string, title: string): Promise<void> {
-    return patch(`/conversations/${id}/title`, { title });
+    return patchVoid(`/conversations/${id}/title`, { title });
   },
   deleteConversation(id: string): Promise<void> {
-    return del(`/conversations/${id}`);
+    return delVoid(`/conversations/${id}`);
   },
   pinConversation(id: string, isPinned: boolean): Promise<void> {
-    return patch(`/conversations/${id}/pin`, { isPinned });
+    return patchVoid(`/conversations/${id}/pin`, { isPinned });
   },
   updateConversationAssistant(id: string, assistantId: string | null): Promise<void> {
-    return patch(`/conversations/${id}/assistant`, { assistantId });
+    return patchVoid(`/conversations/${id}/assistant`, { assistantId });
   },
   updateConversationModel(id: string, modelId: string | null): Promise<void> {
-    return patch(`/conversations/${id}/model`, { modelId });
+    return patchVoid(`/conversations/${id}/model`, { modelId });
   },
   generateConversationTitle(conversationId: string, modelId: string): Promise<string> {
     return post(`/conversations/${conversationId}/generate-title`, { modelId });
@@ -188,62 +251,60 @@ export const webApi = {
     const qs = params.toString();
     return get(`/conversations/${conversationId}/messages${qs ? `?${qs}` : ''}`);
   },
-  async sendMessage(conversationId: string, content: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
-    const response = await post<{ userMessage: Message; assistantMessage: Message }>(`/conversations/${conversationId}/messages`, {
+  async sendMessage(conversationId: string, content: string, modelId: string, onEvent: ChatEventHandler, _commonParams?: CommonParams, _providerParams?: ProviderParams): Promise<Message> {
+    const assistantMessage = await post<Message>(`/conversations/${conversationId}/messages`, {
       content,
       modelId,
-      commonParams: commonParams ?? null,
-      providerParams: providerParams ?? null,
     });
-
-    const { assistantMessage } = response;
+    if (!assistantMessage?.id) {
+      throw new Error(`Invalid response from sendMessage: ${JSON.stringify(assistantMessage)}`);
+    }
     return pollMessage(conversationId, assistantMessage.id, onEvent);
   },
   async sendMessageGroup(conversationId: string, content: string, modelIds: string[], onEvent: ChatEventHandler): Promise<Message[]> {
-    // For group messages, we still use SSE as it's more complex to poll multiple messages
-    // This is acceptable as group messages are less common
-    return new Promise((resolve, reject) => {
-      streamRequest('/api/chat/send-group', { conversationId, content, modelIds }, onEvent)
-        .then(() => resolve([]))
-        .catch(reject);
-    });
+    const messages = await post<Message[]>(
+      `/conversations/${conversationId}/messages/group`,
+      { messages: [{ content }], modelId: modelIds[0] }
+    );
+    if (!Array.isArray(messages)) {
+      throw new Error(`Invalid response from sendMessageGroup: ${JSON.stringify(messages)}`);
+    }
+    return Promise.all(
+      messages.filter(m => m.role === 'assistant')
+        .map(m => pollMessage(conversationId, m.id, onEvent))
+    );
   },
-  async resendMessage(conversationId: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
-    const response = await post<{ assistantMessage: Message }>('/chat/resend', {
-      conversationId,
-      modelId,
-      commonParams: commonParams ?? null,
-      providerParams: providerParams ?? null,
-    });
-
-    const { assistantMessage } = response;
+  async resendMessage(conversationId: string, _modelId: string, onEvent: ChatEventHandler, _commonParams?: CommonParams, _providerParams?: ProviderParams): Promise<Message> {
+    const assistantMessage = await post<Message>(`/conversations/${conversationId}/resend`);
+    if (!assistantMessage?.id) {
+      throw new Error(`Invalid response from resendMessage: ${JSON.stringify(assistantMessage)}`);
+    }
     return pollMessage(conversationId, assistantMessage.id, onEvent);
   },
   stopGeneration(conversationId: string): Promise<void> {
-    return post('/chat/stop', { conversationId });
+    return postVoid(`/conversations/${conversationId}/stop`);
   },
-  async compressConversation(conversationId: string, modelId: string, onEvent: ChatEventHandler): Promise<Message[]> {
-    // For compress, we still use SSE as it's a complex operation
-    return new Promise((resolve, reject) => {
-      streamRequest('/api/chat/compress', { conversationId, modelId }, onEvent)
-        .then(() => resolve([]))
-        .catch(reject);
-    });
+  async compressConversation(conversationId: string, _modelId: string, onEvent: ChatEventHandler): Promise<Message[]> {
+    const message = await post<Message>(`/conversations/${conversationId}/compress`);
+    if (!message?.id) {
+      throw new Error(`Invalid response from compressConversation: ${JSON.stringify(message)}`);
+    }
+    return [await pollMessage(conversationId, message.id, onEvent)];
   },
   deleteMessage(id: string): Promise<void> {
-    return del(`/messages/${id}`);
+    return delVoid(`/messages/${id}`);
   },
   restoreMessage(id: string): Promise<void> {
-    return post(`/messages/${id}/restore`);
+    return postVoid(`/messages/${id}/restore`);
   },
   deleteMessagesAfter(conversationId: string, messageId: string): Promise<void> {
-    return post(`/conversations/${conversationId}/messages/delete-after`, { messageId });
+    return postVoid(`/conversations/${conversationId}/messages/delete-after`, { messageId });
   },
   deleteMessagesFrom(conversationId: string, messageId: string): Promise<void> {
-    return post(`/conversations/${conversationId}/messages/delete-from`, { messageId });
+    return postVoid(`/conversations/${conversationId}/messages/delete-from`, { messageId });
   },
   updateMessageContent(id: string, content: string): Promise<void> {
-    return patch(`/messages/${id}/content`, { content });
+    return patchVoid(`/messages/${id}/content`, { content });
   },
   getPasteBlobContent(pasteId: string): Promise<string> {
     return get(`/paste/${pasteId}`);
@@ -256,41 +317,31 @@ export const webApi = {
   },
 
   // Versions
-  async generateVersion(conversationId: string, messageId: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
-    const response = await post<{ newMessage: Message }>('/chat/generate-version', {
-      conversationId,
-      messageId,
-      modelId,
-      commonParams: commonParams ?? null,
-      providerParams: providerParams ?? null,
-    });
-
-    const { newMessage } = response;
+  async generateVersion(conversationId: string, messageId: string, _modelId: string, onEvent: ChatEventHandler, _commonParams?: CommonParams, _providerParams?: ProviderParams): Promise<Message> {
+    const newMessage = await post<Message>(`/messages/${messageId}/generate-version`);
+    if (!newMessage?.id) {
+      throw new Error(`Invalid response from generateVersion: ${JSON.stringify(newMessage)}`);
+    }
     return pollMessage(conversationId, newMessage.id, onEvent);
   },
-  async regenerateMessage(conversationId: string, messageId: string, modelId: string, onEvent: ChatEventHandler, commonParams?: CommonParams, providerParams?: ProviderParams): Promise<Message> {
-    const response = await post<{ newMessage: Message }>('/chat/regenerate', {
-      conversationId,
-      messageId,
-      modelId,
-      commonParams: commonParams ?? null,
-      providerParams: providerParams ?? null,
-    });
-
-    const { newMessage } = response;
+  async regenerateMessage(conversationId: string, messageId: string, _modelId: string, onEvent: ChatEventHandler, _commonParams?: CommonParams, _providerParams?: ProviderParams): Promise<Message> {
+    const newMessage = await post<Message>(`/messages/${messageId}/regenerate`);
+    if (!newMessage?.id) {
+      throw new Error(`Invalid response from regenerateMessage: ${JSON.stringify(newMessage)}`);
+    }
     return pollMessage(conversationId, newMessage.id, onEvent);
   },
   switchVersion(versionGroupId: string, versionNumber: number): Promise<void> {
-    return post(`/versions/${versionGroupId}/switch`, { versionNumber });
+    return postVoid(`/messages/${versionGroupId}/switch-version`, { versionNumber });
   },
   listVersions(versionGroupId: string): Promise<VersionInfo[]> {
-    return get(`/versions/${versionGroupId}`);
+    return get(`/messages/${versionGroupId}/versions`);
   },
   listVersionMessages(versionGroupId: string): Promise<Message[]> {
-    return get(`/versions/${versionGroupId}/messages`);
+    return get(`/messages/${versionGroupId}/version-messages`);
   },
   getVersionModels(versionGroupId: string): Promise<[number, string][]> {
-    return get(`/versions/${versionGroupId}/models`);
+    return get(`/messages/${versionGroupId}/version-models`);
   },
 
   // Providers
@@ -304,7 +355,7 @@ export const webApi = {
     return patch(`/providers/${id}`, { name, providerType, apiBase, apiKey, enabled });
   },
   deleteProvider(id: string): Promise<void> {
-    return del(`/providers/${id}`);
+    return delVoid(`/providers/${id}`);
   },
   fetchModels(providerId: string): Promise<ModelInfo[]> {
     return post(`/providers/${providerId}/fetch-models`);
@@ -316,10 +367,10 @@ export const webApi = {
     return patch(`/models/${modelId}`, { requestName, displayName, enabled });
   },
   deleteManualModel(modelId: string): Promise<void> {
-    return del(`/models/${modelId}`);
+    return delVoid(`/models/${modelId}`);
   },
   updateModelVisibility(modelId: string, enabled: boolean): Promise<void> {
-    return patch(`/models/${modelId}/visibility`, { enabled });
+    return patchVoid(`/models/${modelId}/visibility`, { enabled });
   },
   updateProviderModelsVisibility(providerId: string, enabled: boolean): Promise<number> {
     return patch(`/providers/${providerId}/models/visibility`, { enabled });
@@ -333,10 +384,10 @@ export const webApi = {
     return get('/assistants');
   },
   updateAssistant(assistant: Assistant): Promise<void> {
-    return patch(`/assistants/${assistant.id}`, { assistant });
+    return patchVoid(`/assistants/${assistant.id}`, assistant);
   },
   deleteAssistant(id: string): Promise<void> {
-    return del(`/assistants/${id}`);
+    return delVoid(`/assistants/${id}`);
   },
 
   // Search
@@ -363,16 +414,16 @@ export const webApi = {
     return get('/settings/cache-size');
   },
   clearCache(): Promise<void> {
-    return post('/settings/clear-cache');
+    return postVoid('/settings/clear-cache');
   },
   resetAppData(): Promise<void> {
-    return post('/settings/reset');
+    return postVoid('/settings/reset');
   },
   setProxyMode(mode: string): Promise<void> {
-    return post('/settings/proxy-mode', { mode });
+    return postVoid('/settings/proxy', { mode });
   },
   getProxyMode(): Promise<string> {
-    return get('/settings/proxy-mode');
+    return get('/settings/proxy');
   },
 
   // 桌面专属（Web 端不支持）
