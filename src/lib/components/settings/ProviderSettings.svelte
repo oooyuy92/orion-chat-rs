@@ -2,6 +2,7 @@
   import { onMount, tick } from 'svelte';
   import type { ProviderConfig, ProviderType } from '$lib/types';
   import { api } from '$lib/utils/invoke';
+  import { uuid } from '$lib/utils/uuid';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
@@ -10,7 +11,7 @@
   import { loadCombos, saveCombos, addCombo, deleteCombo } from '$lib/stores/modelCombos';
   import type { ModelCombo } from '$lib/types';
   import { isManualModel, resolveModelLabel, resolveModelSecondaryLabel } from '$lib/utils/modelDisplay';
-  import { load as loadStore } from '@tauri-apps/plugin-store';
+  import { loadStore } from '$lib/stores/kvStore';
   import { getVersion } from '@tauri-apps/api/app';
   import { i18n, type Language } from '$lib/stores/i18n.svelte';
   import { createDefaultAutoUpdaterController } from '$lib/utils/autoUpdater.js';
@@ -175,7 +176,7 @@
     if (!editComboName.trim() || editComboModelIds.length < 2) return;
     if (editingComboId === 'new') {
       const combo: ModelCombo = {
-        id: crypto.randomUUID(),
+        id: uuid(),
         name: editComboName.trim(),
         modelIds: editComboModelIds,
       };

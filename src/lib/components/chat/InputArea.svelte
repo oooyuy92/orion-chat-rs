@@ -4,6 +4,7 @@
   import ModelParamsPopover from './ModelParamsPopover.svelte';
   import ComboSelector from './ComboSelector.svelte';
   import { i18n } from '$lib/stores/i18n.svelte';
+  import { uuid } from '$lib/utils/uuid';
 
   const PASTE_THRESHOLD = 500;
 
@@ -56,7 +57,7 @@
     if (!text) return;
 
     if (text.length > PASTE_THRESHOLD) {
-      const id = crypto.randomUUID();
+      const id = uuid();
       pastedBlocks.set(id, text);
 
       const span = document.createElement('span');

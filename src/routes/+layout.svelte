@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { load as loadStore } from '@tauri-apps/plugin-store';
+  import { loadStore } from '$lib/stores/kvStore';
   import '../app.css';
   import { i18n } from '$lib/stores/i18n.svelte';
   import { applyTheme } from '$lib/utils/theme.js';

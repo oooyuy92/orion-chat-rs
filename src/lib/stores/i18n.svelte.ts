@@ -1,4 +1,4 @@
-import { load as loadStore } from '@tauri-apps/plugin-store';
+import { loadStore } from '$lib/stores/kvStore';
 import type { Role } from '$lib/types';
 
 export type Language = 'zh' | 'en';

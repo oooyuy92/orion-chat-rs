@@ -1,4 +1,4 @@
-import { load as loadStore } from '@tauri-apps/plugin-store';
+import { loadStore } from '$lib/stores/kvStore';
 import type { ModelCombo } from '$lib/types';
 
 const STORE_NAME = 'model-combos.json';

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount, tick } from 'svelte';
-  import { load as loadStore } from '@tauri-apps/plugin-store';
+  import { loadStore } from '$lib/stores/kvStore';
   import type { Assistant, Conversation, SearchSidebarResult } from '$lib/types';
   import { api } from '$lib/utils/invoke';
   import { waitForTauriReady } from '$lib/api/platform';

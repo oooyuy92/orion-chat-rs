@@ -2,6 +2,7 @@
   import type { Message } from '$lib/types';
   import { renderMarkdown } from '$lib/utils/markdown';
   import { api } from '$lib/utils/invoke';
+  import { uuid } from '$lib/utils/uuid';
   import PencilIcon from '@lucide/svelte/icons/pencil';
   import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
   import CopyIcon from '@lucide/svelte/icons/copy';
@@ -153,7 +154,7 @@
       if (match.index > lastIndex) {
         el.appendChild(document.createTextNode(content.slice(lastIndex, match.index)));
       }
-      const id = crypto.randomUUID();
+      const id = uuid();
       editPastedBlocks.set(id, match[2]);
       const span = document.createElement('span');
       span.className = 'paste-ref';
@@ -188,7 +189,7 @@
     if (!text) return;
 
     if (text.length > PASTE_THRESHOLD) {
-      const id = crypto.randomUUID();
+      const id = uuid();
       editPastedBlocks.set(id, text);
 
       const span = document.createElement('span');

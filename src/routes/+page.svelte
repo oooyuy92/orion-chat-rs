@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { load as loadStore } from '@tauri-apps/plugin-store';
+  import { loadStore } from '$lib/stores/kvStore';
   import { SidebarProvider, SidebarInset, SidebarTrigger } from '$lib/components/ui/sidebar';
   import AppSidebar from '$lib/components/sidebar/AppSidebar.svelte';
   import ChatArea from '$lib/components/chat/ChatArea.svelte';
@@ -10,6 +10,7 @@
   import type { ChatEvent } from '$lib/utils/invoke';
   import type { Assistant, Conversation, Message, ModelGroup, ProviderType } from '$lib/types';
   import { i18n } from '$lib/stores/i18n.svelte';
+  import { uuid } from '$lib/utils/uuid';
 
   type ConversationSelection = {
     conversationId: string;
@@ -566,7 +567,7 @@ function handleConversationSelect(selection: ConversationSelection) {
 
     // Optimistic user message
     const userMsg: Message = {
-      id: crypto.randomUUID(),
+      id: uuid(),
       conversationId: convId,
       role: 'user',
       content,
@@ -583,7 +584,7 @@ function handleConversationSelect(selection: ConversationSelection) {
 
     // Placeholder assistant message
     const assistantMsg: Message = {
-      id: crypto.randomUUID(),
+      id: uuid(),
       conversationId: convId,
       role: 'assistant',
       content: '',
@@ -699,7 +700,7 @@ function handleConversationSelect(selection: ConversationSelection) {
 
       // Create optimistic assistant placeholder
       const assistantMsg: Message = {
-        id: crypto.randomUUID(),
+        id: uuid(),
         conversationId: convId,
         role: 'assistant',
         content: '',
@@ -808,7 +809,7 @@ function handleConversationSelect(selection: ConversationSelection) {
 
       // Generate first version via resendMessage
       const assistantMsg: Message = {
-        id: crypto.randomUUID(),
+        id: uuid(),
         conversationId: convId,
         role: 'assistant',
         content: '',
@@ -863,7 +864,7 @@ function handleConversationSelect(selection: ConversationSelection) {
         if (!currentAiMsg) break;
 
         const placeholder: Message = {
-          id: crypto.randomUUID(),
+          id: uuid(),
           conversationId: convId,
           role: 'assistant',
           content: '',
@@ -990,7 +991,7 @@ function handleConversationSelect(selection: ConversationSelection) {
 
       // Create streaming placeholder for the new version at same position
       const placeholder: Message = {
-        id: crypto.randomUUID(),
+        id: uuid(),
         conversationId: convId,
         role: 'assistant',
         content: '',
@@ -1062,7 +1063,7 @@ function handleConversationSelect(selection: ConversationSelection) {
 
     // Optimistic user message
     const userMsg: Message = {
-      id: crypto.randomUUID(),
+      id: uuid(),
       conversationId: convId,
       role: 'user',
       content,
@@ -1080,7 +1081,7 @@ function handleConversationSelect(selection: ConversationSelection) {
     // Create N placeholder assistant messages for compare view
     const now = new Date().toISOString();
     const placeholders: Message[] = modelIds.map((modelId, idx) => ({
-      id: `placeholder-${idx}-${crypto.randomUUID()}`,
+      id: `placeholder-${idx}-${uuid()}`,
       conversationId: convId,
       role: 'assistant' as const,
       content: '',

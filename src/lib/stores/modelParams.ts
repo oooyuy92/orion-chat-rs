@@ -1,4 +1,4 @@
-import { load as loadStore } from '@tauri-apps/plugin-store';
+import { loadStore } from '$lib/stores/kvStore';
 import type { CommonParams, ProviderParams, ModelParams, ProviderType } from '$lib/types';
 
 const STORE_NAME = 'model-params.json';
