@@ -55,6 +55,48 @@ pub struct MessagesQuery {
     pub before_message_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddProviderRequest {
+    pub name: String,
+    pub provider_type: ProviderType,
+    pub api_key: Option<String>,
+    pub api_base: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateProviderRequest {
+    pub name: String,
+    pub provider_type: ProviderType,
+    pub api_key: Option<String>,
+    pub api_base: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateManualModelRequest {
+    pub request_name: String,
+    pub display_name: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateManualModelRequest {
+    pub request_name: String,
+    pub display_name: Option<String>,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateVisibilityRequest {
+    pub enabled: bool,
+}
+
 // Conversation handlers
 pub async fn list_conversations(
     State(state): State<Arc<AppState>>,
@@ -237,5 +279,218 @@ pub async fn list_models(
     }
 
     Ok(Json(all_models))
+}
+
+// Provider CRUD handlers
+pub async fn add_provider(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddProviderRequest>,
+) -> Result<Json<ProviderConfig>, AppError> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let type_str = core::provider::provider_type_to_db(&req.provider_type);
+    core::provider::validate_provider_config(&req.provider_type, req.api_key.as_deref(), req.enabled)?;
+
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO providers (id, name, type, api_key, base_url, is_enabled) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, req.name, type_str, req.api_key, req.api_base, if req.enabled { 1 } else { 0 }],
+        )?;
+        Ok(())
+    })?;
+
+    if req.enabled {
+        state
+            .register_provider(
+                &id,
+                &req.provider_type,
+                req.api_key.as_deref(),
+                Some(req.api_base.as_str()),
+            )
+            .await?;
+    }
+
+    Ok(Json(ProviderConfig {
+        id,
+        name: req.name,
+        provider_type: req.provider_type,
+        api_base: req.api_base,
+        api_key: req.api_key,
+        models: vec![],
+        enabled: req.enabled,
+    }))
+}
+
+pub async fn update_provider(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateProviderRequest>,
+) -> Result<Json<ProviderConfig>, AppError> {
+    core::provider::validate_provider_config(&req.provider_type, req.api_key.as_deref(), req.enabled)?;
+
+    let type_str = core::provider::provider_type_to_db(&req.provider_type);
+    let rows = state.db.with_conn(|conn| {
+        Ok(conn.execute(
+            "UPDATE providers
+             SET name = ?1, type = ?2, api_key = ?3, base_url = ?4, is_enabled = ?5, updated_at = datetime('now')
+             WHERE id = ?6",
+            rusqlite::params![
+                req.name,
+                type_str,
+                req.api_key,
+                req.api_base,
+                if req.enabled { 1 } else { 0 },
+                id
+            ],
+        )?)
+    })?;
+
+    if rows == 0 {
+        return Err(AppError::NotFound(format!("Provider {id}")));
+    }
+
+    if req.enabled {
+        state
+            .register_provider(
+                &id,
+                &req.provider_type,
+                req.api_key.as_deref(),
+                Some(req.api_base.as_str()),
+            )
+            .await?;
+    } else {
+        state.unregister_provider(&id).await;
+    }
+
+    let models = state.db.with_conn(|conn| core::provider::load_models_for_provider(conn, &id))?;
+    Ok(Json(ProviderConfig {
+        id,
+        name: req.name,
+        provider_type: req.provider_type,
+        api_base: req.api_base,
+        api_key: req.api_key,
+        models,
+        enabled: req.enabled,
+    }))
+}
+
+pub async fn delete_provider(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let rows = state.db.with_conn(|conn| {
+        Ok(conn.execute(
+            "DELETE FROM providers WHERE id = ?1",
+            rusqlite::params![id],
+        )?)
+    })?;
+
+    if rows == 0 {
+        return Err(AppError::NotFound(format!("Provider {id}")));
+    }
+
+    state.unregister_provider(&id).await;
+    Ok(StatusCode::OK)
+}
+
+pub async fn fetch_models_for_provider(
+    State(state): State<Arc<AppState>>,
+    Path(provider_id): Path<String>,
+) -> Result<Json<Vec<ModelInfo>>, AppError> {
+    let provider = state
+        .get_provider(&provider_id)
+        .await
+        .ok_or_else(|| AppError::NotFound(format!("Provider {provider_id}")))?;
+
+    let mut models = provider.list_models().await?;
+
+    for m in &mut models {
+        m.provider_id = provider_id.clone();
+        m.source = ModelSource::Synced;
+    }
+
+    state
+        .db
+        .with_conn(|conn| core::provider::replace_synced_models_for_provider(conn, &provider_id, &models))?;
+
+    state.db.with_conn(|conn| core::provider::load_models_for_provider(conn, &provider_id))
+        .map(Json)
+}
+
+pub async fn create_manual_model(
+    State(state): State<Arc<AppState>>,
+    Path(provider_id): Path<String>,
+    Json(req): Json<CreateManualModelRequest>,
+) -> Result<Json<ModelInfo>, AppError> {
+    state.db.with_conn(|conn| {
+        core::provider::create_manual_model_in_db(
+            conn,
+            &provider_id,
+            &req.request_name,
+            req.display_name.as_deref(),
+            req.enabled,
+        )
+    }).map(Json)
+}
+
+pub async fn update_manual_model(
+    State(state): State<Arc<AppState>>,
+    Path(model_id): Path<String>,
+    Json(req): Json<UpdateManualModelRequest>,
+) -> Result<Json<ModelInfo>, AppError> {
+    state.db.with_conn(|conn| {
+        core::provider::update_manual_model_in_db(
+            conn,
+            &model_id,
+            &req.request_name,
+            req.display_name.as_deref(),
+            req.enabled,
+        )
+    }).map(Json)
+}
+
+pub async fn delete_manual_model(
+    State(state): State<Arc<AppState>>,
+    Path(model_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state
+        .db
+        .with_conn(|conn| core::provider::delete_manual_model_in_db(conn, &model_id))?;
+    Ok(StatusCode::OK)
+}
+
+pub async fn update_model_visibility(
+    State(state): State<Arc<AppState>>,
+    Path(model_id): Path<String>,
+    Json(req): Json<UpdateVisibilityRequest>,
+) -> Result<StatusCode, AppError> {
+    let rows = state.db.with_conn(|conn| core::provider::update_model_visibility_in_db(conn, &model_id, req.enabled))?;
+    if rows == 0 {
+        return Err(AppError::NotFound(format!("Model {model_id}")));
+    }
+    Ok(StatusCode::OK)
+}
+
+pub async fn update_provider_models_visibility(
+    State(state): State<Arc<AppState>>,
+    Path(provider_id): Path<String>,
+    Json(req): Json<UpdateVisibilityRequest>,
+) -> Result<Json<usize>, AppError> {
+    let provider_exists = state.db.with_conn(|conn| {
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM providers WHERE id = ?1",
+            rusqlite::params![&provider_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    })?;
+
+    if !provider_exists {
+        return Err(AppError::NotFound(format!("Provider {provider_id}")));
+    }
+
+    state
+        .db
+        .with_conn(|conn| core::provider::update_provider_models_visibility_in_db(conn, &provider_id, req.enabled))
+        .map(Json)
 }
 
