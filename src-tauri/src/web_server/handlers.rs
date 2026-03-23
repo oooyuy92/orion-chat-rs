@@ -1,11 +1,13 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, sse::{Event, Sse}},
     Json,
 };
+use futures::stream::Stream;
 use serde::Deserialize;
 
 use crate::core;
@@ -196,11 +198,40 @@ pub async fn send_message(
 
     state.db.with_conn(|conn| db::messages::create(conn, &message))?;
 
-    let message = state.db.with_conn(|conn| db::messages::get(conn, &message_id))?;
+    // Create assistant message with streaming status
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
+    let assistant_message = Message {
+        id: assistant_message_id.clone(),
+        conversation_id: conversation_id.clone(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: req.model_id.clone(),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at: now.clone(),
+        version_group_id: None,
+        version_number: 1,
+        total_versions: 1,
+    };
 
-    // TODO: Trigger background streaming task here
-    // For now, just return the user message
-    // The streaming will be implemented in the chat module integration
+    state.db.with_conn(|conn| db::messages::create(conn, &assistant_message))?;
+
+    // Spawn background generation task
+    let model_id = req.model_id.ok_or_else(|| AppError::Provider("Model ID required".into()))?;
+
+    super::background_tasks::spawn_generation_task(
+        state.clone(),
+        conversation_id,
+        assistant_message_id.clone(),
+        model_id,
+        None, // common_params
+        None, // provider_params
+    )
+    .await?;
+
+    // Return the assistant message
+    let message = state.db.with_conn(|conn| db::messages::get(conn, &assistant_message_id))?;
 
     Ok(Json(message))
 }
@@ -1193,4 +1224,71 @@ pub async fn clear_cache(
             .map_err(|e| AppError::Provider(e.to_string()))?;
     }
     Ok(StatusCode::OK)
+}
+
+/// SSE stream handler for message generation progress
+pub async fn stream_message(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    use crate::state::StreamChunk;
+
+    // Create SSE stream
+    let stream = async_stream::stream! {
+        // Check if generation task exists
+        let progress_rx = match state.subscribe_to_generation(&message_id).await {
+            Some(rx) => rx,
+            None => {
+                // Task not found or already completed
+                yield Ok(Event::default()
+                    .event("error")
+                    .data("Task not found or already completed"));
+                return;
+            }
+        };
+
+        let mut rx = progress_rx;
+
+        // Send started event
+        yield Ok(Event::default()
+            .event("started")
+            .data(serde_json::json!({ "messageId": message_id }).to_string()));
+
+        // Continuously receive and push chunks
+        while rx.changed().await.is_ok() {
+            let chunk = rx.borrow().clone();
+
+            match chunk {
+                StreamChunk::Content { content } => {
+                    yield Ok(Event::default()
+                        .event("chunk")
+                        .data(serde_json::json!({
+                            "messageId": message_id,
+                            "content": content
+                        }).to_string()));
+                }
+                StreamChunk::Done { prompt_tokens, completion_tokens } => {
+                    yield Ok(Event::default()
+                        .event("done")
+                        .data(serde_json::json!({
+                            "messageId": message_id,
+                            "promptTokens": prompt_tokens,
+                            "completionTokens": completion_tokens
+                        }).to_string()));
+                    break;
+                }
+                StreamChunk::Error { message } => {
+                    yield Ok(Event::default()
+                        .event("error")
+                        .data(serde_json::json!({
+                            "messageId": message_id,
+                            "message": message
+                        }).to_string()));
+                    break;
+                }
+            }
+        }
+    };
+
+    Sse::new(stream)
 }

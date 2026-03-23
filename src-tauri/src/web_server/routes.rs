@@ -34,6 +34,7 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<&str>) -> Router {
         .route("/messages/:id/versions", get(handlers::list_versions))
         .route("/messages/:id/version-messages", get(handlers::list_version_messages))
         .route("/messages/:id/version-models", get(handlers::get_version_models))
+        .route("/messages/:id/stream", get(handlers::stream_message))
         // Paste routes
         .route("/paste/:id", get(handlers::get_paste_blob_content))
         .route("/paste/hydrate", post(handlers::hydrate_paste_content))
