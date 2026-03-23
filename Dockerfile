@@ -21,7 +21,7 @@ COPY svelte.config.js tsconfig.json vite.config.ts ./
 RUN pnpm run build
 
 # Stage 2: Backend Build
-FROM rust:1.77-alpine AS backend-builder
+FROM rust:1.80-alpine AS backend-builder
 
 WORKDIR /app
 
