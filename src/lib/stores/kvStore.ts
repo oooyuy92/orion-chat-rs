@@ -3,6 +3,7 @@
  * - Tauri 桌面端：使用 @tauri-apps/plugin-store（基于文件）
  * - Web / PWA 端：使用 localStorage
  */
+import { load } from '@tauri-apps/plugin-store';
 import { isTauri } from '$lib/api/platform';
 
 export interface KVStore {
@@ -50,7 +51,6 @@ class WebStore implements KVStore {
  */
 export async function loadStore(name: string): Promise<KVStore> {
   if (isTauri()) {
-    const { load } = await import('@tauri-apps/plugin-store');
     return load(name);
   }
   return new WebStore(name);
