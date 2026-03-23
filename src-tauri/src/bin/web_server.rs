@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use orion_chat_rs::{
-    db::Database,
     models::ProviderType,
     state::AppState,
     web_server,
@@ -43,14 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
 
     // Initialize database and app state
-    let db = Database::new(&db_path)?;
-    let app_state = Arc::new(AppState {
-        db,
-        data_dir: data_dir.clone(),
-        providers: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-        cancel_tokens: tokio::sync::Mutex::new(std::collections::HashMap::new()),
-        proxy_mode: tokio::sync::Mutex::new("system".to_string()),
-    });
+    let app_state = Arc::new(AppState::new(&db_path, data_dir.clone())?);
 
     // Load and register providers from database
     println!("Loading providers from database...");

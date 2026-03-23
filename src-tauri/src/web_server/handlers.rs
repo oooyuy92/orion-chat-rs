@@ -1,11 +1,13 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, sse::{Event, Sse}},
     Json,
 };
+use futures::stream::Stream;
 use serde::Deserialize;
 
 use crate::core;
@@ -196,11 +198,40 @@ pub async fn send_message(
 
     state.db.with_conn(|conn| db::messages::create(conn, &message))?;
 
-    let message = state.db.with_conn(|conn| db::messages::get(conn, &message_id))?;
+    // Create assistant message with streaming status
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
+    let assistant_message = Message {
+        id: assistant_message_id.clone(),
+        conversation_id: conversation_id.clone(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: req.model_id.clone(),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at: now.clone(),
+        version_group_id: None,
+        version_number: 1,
+        total_versions: 1,
+    };
 
-    // TODO: Trigger background streaming task here
-    // For now, just return the user message
-    // The streaming will be implemented in the chat module integration
+    state.db.with_conn(|conn| db::messages::create(conn, &assistant_message))?;
+
+    // Spawn background generation task
+    let model_id = req.model_id.ok_or_else(|| AppError::Provider("Model ID required".into()))?;
+
+    super::background_tasks::spawn_generation_task(
+        state.clone(),
+        conversation_id,
+        assistant_message_id.clone(),
+        model_id,
+        None, // common_params
+        None, // provider_params
+    )
+    .await?;
+
+    // Return the assistant message
+    let message = state.db.with_conn(|conn| db::messages::get(conn, &assistant_message_id))?;
 
     Ok(Json(message))
 }
@@ -1193,4 +1224,402 @@ pub async fn clear_cache(
             .map_err(|e| AppError::Provider(e.to_string()))?;
     }
     Ok(StatusCode::OK)
+}
+
+/// SSE stream handler for message generation progress
+pub async fn stream_message(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    use crate::state::StreamChunk;
+
+    // Create SSE stream
+    let stream = async_stream::stream! {
+        // Check if generation task exists
+        let progress_rx = match state.subscribe_to_generation(&message_id).await {
+            Some(rx) => rx,
+            None => {
+                // Task not found or already completed
+                yield Ok(Event::default()
+                    .event("error")
+                    .data("Task not found or already completed"));
+                return;
+            }
+        };
+
+        let mut rx = progress_rx;
+
+        // Send started event
+        yield Ok(Event::default()
+            .event("started")
+            .data(serde_json::json!({ "messageId": message_id }).to_string()));
+
+        // Continuously receive and push chunks
+        while rx.changed().await.is_ok() {
+            let chunk = rx.borrow().clone();
+
+            match chunk {
+                StreamChunk::Content { content } => {
+                    yield Ok(Event::default()
+                        .event("chunk")
+                        .data(serde_json::json!({
+                            "messageId": message_id,
+                            "content": content
+                        }).to_string()));
+                }
+                StreamChunk::Done { prompt_tokens, completion_tokens } => {
+                    yield Ok(Event::default()
+                        .event("done")
+                        .data(serde_json::json!({
+                            "messageId": message_id,
+                            "promptTokens": prompt_tokens,
+                            "completionTokens": completion_tokens
+                        }).to_string()));
+                    break;
+                }
+                StreamChunk::Error { message } => {
+                    yield Ok(Event::default()
+                        .event("error")
+                        .data(serde_json::json!({
+                            "messageId": message_id,
+                            "message": message
+                        }).to_string()));
+                    break;
+                }
+            }
+        }
+    };
+
+    Sse::new(stream)
+}
+
+/// Stop ongoing generation for a conversation
+pub async fn stop_generation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.cancel_conversation(&conversation_id).await;
+    Ok(StatusCode::OK)
+}
+
+/// Regenerate an assistant message with streaming
+pub async fn regenerate_message(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Json<Message>, AppError> {
+    // Get the message to regenerate
+    let message = state.db.with_conn(|conn| db::messages::get(conn, &message_id))?;
+
+    if message.role != Role::Assistant {
+        return Err(AppError::Provider("Can only regenerate assistant messages".into()));
+    }
+
+    // Clear the message content and set to streaming
+    state.db.with_conn(|conn| {
+        db::messages::clear_for_regenerate(conn, &message_id)
+    })?;
+
+    // Get model_id from the message
+    let model_id = message.model_id.ok_or_else(|| AppError::Provider("Message has no model_id".into()))?;
+
+    // Spawn background generation task
+    super::background_tasks::spawn_generation_task(
+        state.clone(),
+        message.conversation_id.clone(),
+        message_id.clone(),
+        model_id,
+        None,
+        None,
+    )
+    .await?;
+
+    // Return the updated message
+    let updated_message = state.db.with_conn(|conn| db::messages::get(conn, &message_id))?;
+    Ok(Json(updated_message))
+}
+
+/// Generate a new version of an assistant message with streaming
+pub async fn generate_message_version(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Json<Message>, AppError> {
+    // Get the original message
+    let original = state.db.with_conn(|conn| db::messages::get(conn, &message_id))?;
+
+    if original.role != Role::Assistant {
+        return Err(AppError::Provider("Can only create versions of assistant messages".into()));
+    }
+
+    let model_id = original.model_id.ok_or_else(|| AppError::Provider("Message has no model_id".into()))?;
+
+    // Initialize version group if needed
+    state.db.with_conn(|conn| {
+        db::messages::init_version_group(conn, &message_id)
+    })?;
+
+    // Get version group id
+    let version_group_id = state.db.with_conn(|conn| {
+        db::messages::get(conn, &message_id).map(|m| m.version_group_id)
+    })?.ok_or_else(|| AppError::Provider("Failed to get version group".into()))?;
+
+    // Deactivate all versions in this group
+    state.db.with_conn(|conn| {
+        db::messages::deactivate_versions(conn, &version_group_id)
+    })?;
+
+    // Get next version number
+    let version_number = state.db.with_conn(|conn| {
+        db::messages::next_version_number(conn, &version_group_id)
+    })?;
+
+    // Create new version message
+    let new_message_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let new_message = Message {
+        id: new_message_id.clone(),
+        conversation_id: original.conversation_id.clone(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: Some(model_id.clone()),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at: now,
+        version_group_id: Some(version_group_id.clone()),
+        version_number,
+        total_versions: version_number,
+    };
+
+    state.db.with_conn(|conn| db::messages::create_version(conn, &new_message, true))?;
+
+    // Spawn background generation task
+    super::background_tasks::spawn_generation_task(
+        state.clone(),
+        original.conversation_id,
+        new_message_id.clone(),
+        model_id,
+        None,
+        None,
+    )
+    .await?;
+
+    // Return the new message
+    let message = state.db.with_conn(|conn| db::messages::get(conn, &new_message_id))?;
+    Ok(Json(message))
+}
+
+/// Resend last user message and generate new assistant response
+pub async fn resend_message(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<Message>, AppError> {
+    // Get conversation messages
+    let messages = state.db.with_conn(|conn| {
+        db::messages::list_by_conversation(conn, &conversation_id)
+    })?;
+
+    // Find the last user message
+    let _last_user_msg = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .ok_or_else(|| AppError::NotFound("No user message found".into()))?;
+
+    // Get model_id from last assistant message or conversation default
+    let model_id = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant && m.model_id.is_some())
+        .and_then(|m| m.model_id.clone())
+        .ok_or_else(|| AppError::Provider("No model_id found".into()))?;
+
+    // Create new assistant message
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let assistant_message = Message {
+        id: assistant_message_id.clone(),
+        conversation_id: conversation_id.clone(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: Some(model_id.clone()),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at: now,
+        version_group_id: None,
+        version_number: 1,
+        total_versions: 1,
+    };
+
+    state.db.with_conn(|conn| db::messages::create(conn, &assistant_message))?;
+
+    // Spawn background generation task
+    super::background_tasks::spawn_generation_task(
+        state.clone(),
+        conversation_id,
+        assistant_message_id.clone(),
+        model_id,
+        None,
+        None,
+    )
+    .await?;
+
+    // Return the assistant message
+    let message = state.db.with_conn(|conn| db::messages::get(conn, &assistant_message_id))?;
+    Ok(Json(message))
+}
+
+/// Compress/summarize a conversation with streaming
+pub async fn compress_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<Message>, AppError> {
+    // Get conversation messages
+    let messages = state.db.with_conn(|conn| {
+        db::messages::list_by_conversation(conn, &conversation_id)
+    })?;
+
+    if messages.is_empty() {
+        return Err(AppError::NotFound("No messages in conversation".into()));
+    }
+
+    // Get model_id from last assistant message or use default
+    let model_id = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant && m.model_id.is_some())
+        .and_then(|m| m.model_id.clone())
+        .ok_or_else(|| AppError::Provider("No model_id found".into()))?;
+
+    // Create a system message for compression
+    let _compress_prompt = "请用简洁的语言总结以上对话的核心内容，保留关键信息和结论。";
+
+    // Create assistant message for the summary
+    let summary_message_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let summary_message = Message {
+        id: summary_message_id.clone(),
+        conversation_id: conversation_id.clone(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: Some(model_id.clone()),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at: now,
+        version_group_id: None,
+        version_number: 1,
+        total_versions: 1,
+    };
+
+    state.db.with_conn(|conn| db::messages::create(conn, &summary_message))?;
+
+    // Build custom common params for compression (shorter response)
+    let common_params = CommonParams {
+        temperature: Some(0.3), // Lower temperature for more focused summary
+        top_p: None,
+        max_tokens: Some(500), // Limit summary length
+        stream: true,
+    };
+
+    // Spawn background generation task with compression prompt
+    super::background_tasks::spawn_generation_task(
+        state.clone(),
+        conversation_id,
+        summary_message_id.clone(),
+        model_id,
+        Some(common_params),
+        None,
+    )
+    .await?;
+
+    // Return the summary message
+    let message = state.db.with_conn(|conn| db::messages::get(conn, &summary_message_id))?;
+    Ok(Json(message))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupSendRequest {
+    pub messages: Vec<GroupMessage>,
+    pub model_id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupMessage {
+    pub content: String,
+}
+
+/// Send multiple messages in a group with streaming responses
+pub async fn group_send_messages(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<GroupSendRequest>,
+) -> Result<Json<Vec<Message>>, AppError> {
+    if req.messages.is_empty() {
+        return Err(AppError::Provider("No messages provided".into()));
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut created_messages = Vec::new();
+
+    // Create all user and assistant message pairs
+    for group_msg in req.messages {
+        // Create user message
+        let user_message_id = uuid::Uuid::new_v4().to_string();
+        let user_message = Message {
+            id: user_message_id.clone(),
+            conversation_id: conversation_id.clone(),
+            role: Role::User,
+            content: group_msg.content,
+            reasoning: None,
+            model_id: Some(req.model_id.clone()),
+            status: MessageStatus::Done,
+            token_count: None,
+            created_at: now.clone(),
+            version_group_id: None,
+            version_number: 1,
+            total_versions: 1,
+        };
+
+        state.db.with_conn(|conn| db::messages::create(conn, &user_message))?;
+
+        // Create assistant message
+        let assistant_message_id = uuid::Uuid::new_v4().to_string();
+        let assistant_message = Message {
+            id: assistant_message_id.clone(),
+            conversation_id: conversation_id.clone(),
+            role: Role::Assistant,
+            content: String::new(),
+            reasoning: None,
+            model_id: Some(req.model_id.clone()),
+            status: MessageStatus::Streaming,
+            token_count: None,
+            created_at: now.clone(),
+            version_group_id: None,
+            version_number: 1,
+            total_versions: 1,
+        };
+
+        state.db.with_conn(|conn| db::messages::create(conn, &assistant_message))?;
+
+        // Spawn background generation task for this message
+        super::background_tasks::spawn_generation_task(
+            state.clone(),
+            conversation_id.clone(),
+            assistant_message_id.clone(),
+            req.model_id.clone(),
+            None,
+            None,
+        )
+        .await?;
+
+        created_messages.push(assistant_message);
+    }
+
+    Ok(Json(created_messages))
 }
