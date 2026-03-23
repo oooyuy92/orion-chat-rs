@@ -1292,3 +1292,181 @@ pub async fn stream_message(
 
     Sse::new(stream)
 }
+
+/// Stop ongoing generation for a conversation
+pub async fn stop_generation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Result<StatusCode, AppError> {
+    state.cancel_conversation(&conversation_id).await;
+    Ok(StatusCode::OK)
+}
+
+/// Regenerate an assistant message with streaming
+pub async fn regenerate_message(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Json<Message>, AppError> {
+    // Get the message to regenerate
+    let message = state.db.with_conn(|conn| db::messages::get(conn, &message_id))?;
+
+    if message.role != Role::Assistant {
+        return Err(AppError::Provider("Can only regenerate assistant messages".into()));
+    }
+
+    // Clear the message content and set to streaming
+    state.db.with_conn(|conn| {
+        db::messages::clear_for_regenerate(conn, &message_id)
+    })?;
+
+    // Get model_id from the message
+    let model_id = message.model_id.ok_or_else(|| AppError::Provider("Message has no model_id".into()))?;
+
+    // Spawn background generation task
+    super::background_tasks::spawn_generation_task(
+        state.clone(),
+        message.conversation_id.clone(),
+        message_id.clone(),
+        model_id,
+        None,
+        None,
+    )
+    .await?;
+
+    // Return the updated message
+    let updated_message = state.db.with_conn(|conn| db::messages::get(conn, &message_id))?;
+    Ok(Json(updated_message))
+}
+
+/// Generate a new version of an assistant message with streaming
+pub async fn generate_message_version(
+    State(state): State<Arc<AppState>>,
+    Path(message_id): Path<String>,
+) -> Result<Json<Message>, AppError> {
+    // Get the original message
+    let original = state.db.with_conn(|conn| db::messages::get(conn, &message_id))?;
+
+    if original.role != Role::Assistant {
+        return Err(AppError::Provider("Can only create versions of assistant messages".into()));
+    }
+
+    let model_id = original.model_id.ok_or_else(|| AppError::Provider("Message has no model_id".into()))?;
+
+    // Initialize version group if needed
+    state.db.with_conn(|conn| {
+        db::messages::init_version_group(conn, &message_id)
+    })?;
+
+    // Get version group id
+    let version_group_id = state.db.with_conn(|conn| {
+        db::messages::get(conn, &message_id).map(|m| m.version_group_id)
+    })?.ok_or_else(|| AppError::Provider("Failed to get version group".into()))?;
+
+    // Deactivate all versions in this group
+    state.db.with_conn(|conn| {
+        db::messages::deactivate_versions(conn, &version_group_id)
+    })?;
+
+    // Get next version number
+    let version_number = state.db.with_conn(|conn| {
+        db::messages::next_version_number(conn, &version_group_id)
+    })?;
+
+    // Create new version message
+    let new_message_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let new_message = Message {
+        id: new_message_id.clone(),
+        conversation_id: original.conversation_id.clone(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: Some(model_id.clone()),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at: now,
+        version_group_id: Some(version_group_id.clone()),
+        version_number,
+        total_versions: version_number,
+    };
+
+    state.db.with_conn(|conn| db::messages::create_version(conn, &new_message, true))?;
+
+    // Spawn background generation task
+    super::background_tasks::spawn_generation_task(
+        state.clone(),
+        original.conversation_id,
+        new_message_id.clone(),
+        model_id,
+        None,
+        None,
+    )
+    .await?;
+
+    // Return the new message
+    let message = state.db.with_conn(|conn| db::messages::get(conn, &new_message_id))?;
+    Ok(Json(message))
+}
+
+/// Resend last user message and generate new assistant response
+pub async fn resend_message(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<Message>, AppError> {
+    // Get conversation messages
+    let messages = state.db.with_conn(|conn| {
+        db::messages::list_by_conversation(conn, &conversation_id)
+    })?;
+
+    // Find the last user message
+    let _last_user_msg = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::User)
+        .ok_or_else(|| AppError::NotFound("No user message found".into()))?;
+
+    // Get model_id from last assistant message or conversation default
+    let model_id = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Assistant && m.model_id.is_some())
+        .and_then(|m| m.model_id.clone())
+        .ok_or_else(|| AppError::Provider("No model_id found".into()))?;
+
+    // Create new assistant message
+    let assistant_message_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let assistant_message = Message {
+        id: assistant_message_id.clone(),
+        conversation_id: conversation_id.clone(),
+        role: Role::Assistant,
+        content: String::new(),
+        reasoning: None,
+        model_id: Some(model_id.clone()),
+        status: MessageStatus::Streaming,
+        token_count: None,
+        created_at: now,
+        version_group_id: None,
+        version_number: 1,
+        total_versions: 1,
+    };
+
+    state.db.with_conn(|conn| db::messages::create(conn, &assistant_message))?;
+
+    // Spawn background generation task
+    super::background_tasks::spawn_generation_task(
+        state.clone(),
+        conversation_id,
+        assistant_message_id.clone(),
+        model_id,
+        None,
+        None,
+    )
+    .await?;
+
+    // Return the assistant message
+    let message = state.db.with_conn(|conn| db::messages::get(conn, &assistant_message_id))?;
+    Ok(Json(message))
+}

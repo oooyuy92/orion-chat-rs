@@ -27,6 +27,8 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<&str>) -> Router {
         .route("/conversations/:id/messages", post(handlers::send_message))
         .route("/conversations/:id/messages/delete-after", post(handlers::delete_messages_after))
         .route("/conversations/:id/messages/delete-from", post(handlers::delete_messages_from))
+        .route("/conversations/:id/stop", post(handlers::stop_generation))
+        .route("/conversations/:id/resend", post(handlers::resend_message))
         .route("/messages/:id", delete(handlers::delete_message))
         .route("/messages/:id/restore", post(handlers::restore_message))
         .route("/messages/:id/content", patch(handlers::update_message_content))
@@ -35,6 +37,8 @@ pub fn create_router(state: Arc<AppState>, static_dir: Option<&str>) -> Router {
         .route("/messages/:id/version-messages", get(handlers::list_version_messages))
         .route("/messages/:id/version-models", get(handlers::get_version_models))
         .route("/messages/:id/stream", get(handlers::stream_message))
+        .route("/messages/:id/regenerate", post(handlers::regenerate_message))
+        .route("/messages/:id/generate-version", post(handlers::generate_message_version))
         // Paste routes
         .route("/paste/:id", get(handlers::get_paste_blob_content))
         .route("/paste/hydrate", post(handlers::hydrate_paste_content))
